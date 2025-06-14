@@ -1,19 +1,16 @@
-export HCCL_IF_IP=${local_ip}
-export GLOO_SOCKET_IFNAME=${ifname}
-export TP_SOCKET_IFNAME=${ifname}
-export HCCL_SOCKET_IFNAME=${ifname}
+export HCCL_IF_IP=141.61.39.181
+export GLOO_SOCKET_IFNAME=enp48s3u1u1
+export TP_SOCKET_IFNAME=enp48s3u1u1
+export HCCL_SOCKET_IFNAME=enp48s3u1u1
 
-# dp_size = node_size * dp_per_node
-node_size=1
-node_rank=0
-dp_per_node=4
-master_addr=127.0.0.1
-master_port=12345
+export VLLM_USE_V1=1
 
-rm -rf ./.torchair_cache/
-rm -rf ./dynamo_*
-rm -rf /root/ascend/log/debug/plog/*
-
-torchrun --nproc_per_node ${dp_per_node} --nnodes ${node_size} \
-    --node_rank ${node_rank} --master_addr ${master_addr} --master_port ${master_port} \
-    data_parallel.py
+python3 data_parallel.py \
+    --model="/mnt/nfs/weight/dsv3_w8a8" \
+    --dp-size=4 \
+    --tp-size=4 \
+    --node-size=1 \
+    --node-rank=0 \
+    --master-addr=141.61.39.181 \
+    --master-port=13345 \
+    --trust-remote-code
