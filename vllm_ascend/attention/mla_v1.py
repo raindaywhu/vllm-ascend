@@ -122,6 +122,7 @@ class AscendMLAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
+    max_num_tokens_across_dp: int = 0
     with_prefill_across_dp: bool = False
 
     query_lens: Optional[list[int]] = None
@@ -325,6 +326,7 @@ class AscendMLAMetadataBuilder:
         common_attn_metadata: CommonAttentionMetadata,
         common_prefix_len: Optional[int] = None,
         graph_pad_size: int = -1,
+        max_num_tokens_across_dp: int = 0,
         with_prefill_across_dp: bool = False,
     ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
@@ -433,6 +435,7 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
+            max_num_tokens_across_dp=max_num_tokens_across_dp,
             with_prefill_across_dp=with_prefill_across_dp,
         )
 
