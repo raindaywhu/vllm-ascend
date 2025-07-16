@@ -37,12 +37,14 @@ class EplbUpdator:
         self.eplb_loader = D2DExpertWeightLoader(eplb_adaptor=self.adaptor)
         self.num_moe_layers = self.adaptor.num_moe_layers
         self.global_expert_num = self.adaptor.global_expert_num
+        self.total_iterations = self.num_iterations_eplb_update +\
+            self.num_wait_worker_iterations + self.num_moe_layers
 
     def init_eplb(self, expert_map_path):
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
         self.redundant_enable = (expert_map_path is not None)
-        self.num_iterations_eplb_update: torch.int64 = 130
+        self.num_iterations_eplb_update: torch.int64 = 400
         self.expert_map_path = expert_map_path
 
         try:
@@ -60,6 +62,7 @@ class EplbUpdator:
         self.update_info_all = []
 
         self.cur_iterations: torch.int64 = 0
+        self.eplb_counter = 0
 
         self.num_wait_worker_iterations: torch.int64 = 30
 
@@ -95,6 +98,7 @@ class EplbUpdator:
             self.num_wait_worker_iterations + self.num_moe_layers):
             self.adaptor.model.clear_all_moe_loads()
             if not self.gate_eplb:
+                self.eplb_counter += 1
                 self.cur_iterations = 0
 
     def get_update_info_flag(self):
@@ -106,6 +110,9 @@ class EplbUpdator:
     def update_expert_weight_flag(self):
         weight_update_counter = self.cur_iterations - (self.num_iterations_eplb_update + self.num_wait_worker_iterations)
         return (weight_update_counter >= 0 and weight_update_counter < self.num_moe_layers)
+
+    def moe_load_dump_flag(self):
+        return (self.eplb_counter * self.total_iterations + self.cur_iterations) % 100 == 0
 
     def get_init_expert_map(self):
         try:
@@ -145,6 +152,9 @@ class EplbUpdator:
             moe_load = self.compute_and_set_moe_load(is_clear=True)
             self.wakeup_eplb_worker()
 
+        if self.moe_load_dump_flag():
+            self.compute_and_set_moe_load()
+
         if self.update_expert_weight_flag():
             self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
 
@@ -166,7 +176,10 @@ class EplbUpdator:
             dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
             moe_load = self._gather_buffer.permute(1, 0, 2)
-            self.shared_dict["moe_load"] = moe_load.cpu()
+            moe_load_cpu = moe_load.cpu()
+            self.shared_dict["moe_load"] = moe_load_cpu
+            if dist.get_rank() == 0:
+                numpy.save(f"/xxx/moe_load_{self.eplb_counter * self.total_iterations + self.cur_iterations}.npy", moe_load_cpu.numpy())
             logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
         else:
             moe_load = local_load.unsqueeze(1)

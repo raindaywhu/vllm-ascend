@@ -39,7 +39,8 @@ class EplbWorker:
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
         self.redundant_enable = redundant_enable
-        self.rank_id  = dist.get_rank()
+        self.rank_id = dist.get_rank()
+        self.eplb_counter = 0
 
     def do_update(self):
         # put data in to queue
@@ -70,6 +71,10 @@ class EplbWorker:
         new_expert_maps = self.local2global(new_placement)
         self.update_expert_map(new_expert_maps)
         logger.debug(f"[EPLB Process  new_map differs, performing D2D")
+
+        if self.rank_id == 0:
+            np.save(f"/xxx/old_placement_{self.eplb_counter}.npy", old_placement.numpy())
+            np.save(f"/xxx/new_placement_{self.eplb_counter}.npy", new_placement.numpy())
 
         update_info = self.compose_expert_update_info_bipartite(new_expert_maps, self.old_expert_maps)\
             if self.policy_type <= 2 else self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
