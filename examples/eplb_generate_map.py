@@ -22,19 +22,26 @@ def split_and_insert(n, k, m):
     return np.concatenate(groups)
 
 
-def random_generation(n_layer=58, n_expert=256, start_layer_idx=0, device_count=128, n_redundant=128, output_name=""):
+def random_generation(n_layer=58,
+                      n_expert=256,
+                      start_layer_idx=0,
+                      device_count=128,
+                      n_redundant=128,
+                      output_name=""):
     expert_data = {}
     expert_data["moe_layer_count"] = n_layer
     layer_list = []
     for i in range(n_layer):
         layer = {"layer_id": start_layer_idx + i, "device_count": device_count}
-        random_placement = split_and_insert(n_expert, device_count, n_redundant)
+        random_placement = split_and_insert(n_expert, device_count,
+                                            n_redundant)
         device_list = []
         step = random_placement.shape[0] // device_count
         for j in range(device_count):
             device = {}
             device["device_id"] = j
-            device["device_expert"] = random_placement[j * step: (j + 1) * step].tolist()
+            device["device_expert"] = random_placement[j * step:(j + 1) *
+                                                       step].tolist()
             device_list.append(device)
         layer["device_list"] = device_list
         layer_list.append(layer)
@@ -47,8 +54,12 @@ def random_generation(n_layer=58, n_expert=256, start_layer_idx=0, device_count=
 
     print(f"JSON file generated: {json_file_path}")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="python generate_map.py --n_layers 2 --n_experts 256 --card_num 8 --n_redundant 8 --output expert_map.json")
+    parser = argparse.ArgumentParser(
+        description=
+        "python generate_map.py --n_layers 2 --n_experts 256 --card_num 8 --n_redundant 8 --output expert_map.json"
+    )
     parser.add_argument("--n_layers", type=int, required=True)
     parser.add_argument("--n_experts", type=int, required=True)
     parser.add_argument("--card_num", type=int, required=True)
