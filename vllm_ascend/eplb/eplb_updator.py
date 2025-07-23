@@ -25,7 +25,6 @@ from vllm.logger import logger
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.ascend_config import get_ascend_config
-from queue import Queue
 from typing import Any
 
 
@@ -67,8 +66,8 @@ class EplbUpdator:
 
         self.num_wait_worker_iterations: torch.int64 = self.ascend_config.num_wait_worker_iterations
 
-        self.planner_block_queue = Queue()
-        self.block_update_queue = Queue(maxsize=1)
+        self.planner_block_queue: Queue = Queue()
+        self.block_update_queue: Queue = Queue(maxsize=1)
 
         self.manager = Manager()
         self.shared_dict = self.manager.dict({

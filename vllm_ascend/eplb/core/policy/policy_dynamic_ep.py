@@ -1,5 +1,6 @@
 # Copyright Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
 from collections import defaultdict
+from typing import cast
 import numpy as np
 
 from .policy_abstract import EplbPolicy, DynamicConfig
@@ -32,7 +33,7 @@ class DynamicEplb(EplbPolicy):
         layer_num, npu_num, experts_per_npu = expert_workload.shape
         workload_new = np.zeros((layer_num, num_original_expert))
         for layer_idx in range(layer_num):
-            workload_dict = defaultdict(int)
+            wworkload_dict: dict[int, int] = defaultdict(int)
             placement_layer = current_expert_table[layer_idx].copy()
             workload_layer = expert_workload[layer_idx].copy()
             for npu_idx in range(npu_num):
@@ -50,7 +51,7 @@ class DynamicEplb(EplbPolicy):
         # Step 1: Sort the items by weight in descending order (we are sorting by weight now)
         # Sort based on the second element (the second value of each tuple)
         route_expert_num = len(origin_weights)
-        route_expert_redundancy = [[] for _ in range(route_expert_num)]
+        route_expert_redundancy: list[list[int]] = [[] for _ in range(n)]
         for i in range(num_redundancy_expert):
             sorted_indices = np.argsort([t[1] for t in origin_weights],
                                         kind='stable')[::-1]
@@ -69,8 +70,8 @@ class DynamicEplb(EplbPolicy):
         remaining_items = expert_num % card_num  # Number of items per box
 
         # Step 3: Initialize card_num boxes with empty lists to store item IDs
-        boxes = [[] for _ in range(card_num)]
-        boxes_weights = [[] for _ in range(card_num)]
+        boxes: list[list[int]] = [[] for _ in range(card_num)]
+        boxes_weights: list[list[float]] = [[] for _ in range(card_num)]
         box_weights = [0] * card_num  # To store the total weight of each box
         box_counts = [0] * card_num  # To store the number of items in each box
         index = 0
@@ -135,7 +136,7 @@ class DynamicEplb(EplbPolicy):
     def compute_balanced_pack_redundancy(origin_weights, card_num,
                                          num_redundancy_expert):
         route_expert_num = len(origin_weights)
-        route_expert_redundancy = [[] for _ in range(route_expert_num)]
+        route_expert_redundancy: list[list[int]] = [[] for _ in range(n)]
         for i in range(num_redundancy_expert):
             sorted_indices = np.argsort([t[1] for t in origin_weights],
                                         kind='stable')[::-1]
@@ -154,8 +155,8 @@ class DynamicEplb(EplbPolicy):
         items_per_box = expert_num // card_num
         remaining_items = expert_num % card_num
 
-        boxes = [[] for _ in range(card_num)]
-        boxes_weights = [[] for _ in range(card_num)]
+        boxes: list[list[int]] = [[] for _ in range(card_num)]
+        boxes_weights: list[list[float]] = [[] for _ in range(card_num)]
         box_weights = [0] * card_num
         box_counts = [0] * card_num
 
@@ -217,8 +218,8 @@ class DynamicEplb(EplbPolicy):
         items_per_box = expert_num // card_num
         remaining_items = expert_num % card_num
 
-        boxes = [[] for _ in range(card_num)]
-        boxes_weights = [[] for _ in range(card_num)]
+        boxes: list[list[int]] = [[] for _ in range(card_num)]
+        boxes_weights: list[list[float]] = [[] for _ in range(card_num)]
         box_weights = [0] * card_num
         box_counts = [0] * card_num
 
@@ -255,12 +256,12 @@ class DynamicEplb(EplbPolicy):
 
     @staticmethod
     def get_redundant_num(npu_num, counts):
-        redundant_num_each_npu = np.sum(counts - 1)
+        redundant_num_each_npu: int = np.sum(counts - 1)
         return redundant_num_each_npu
 
     @staticmethod
     def calculate_max_heat_per_layer(workload_table, layer_num):
-        max_heat_per_layer = []
+        max_heat_per_layer: list[float] = []
         for layer_idx in range(layer_num):
             npu_heats_now = np.sum(workload_table[layer_idx], axis=1)
             max_heat_per_layer.append(np.max(npu_heats_now))
@@ -310,9 +311,11 @@ class DynamicEplb(EplbPolicy):
         info = DynamicTable()
         info.workload_table = np.array(expert_workload)
         info.placement_table = np.array(current_expert_table)
+        assert info.workload_table is not None
         layer_num, num_npus, experts_per_npu = info.workload_table.shape
-        expert_ids, counts = np.unique(info.placement_table[0],
-                                       return_counts=True)
+        assert info.placement_table is not None
+        row = cast(np.ndarray, info.placement_table[0])
+        expert_ids, counts = np.unique(row, return_counts=True)
         num_redundancy_expert = self.get_redundant_num(num_npus, counts)
         num_original_expert = len(expert_ids)
         layer_workloads = self.add_redundant(info.placement_table,
@@ -340,8 +343,7 @@ class DynamicEplb(EplbPolicy):
             )
 
         # Number of experts deployed on each card includes one redundant expert
-        global_deployment = [[[] for _ in range(num_npus)]
-                             for _ in range(layer_num)]
+        global_deployment: list[list[list[int]]] = [[[] for _ in range(num_npus)] for _ in range(layer_num)]
         # Iterate to obtain the placement strategy for each layer, taking computational balance into account
         max_heat_per_layer_after = np.zeros([layer_num])
         for layer in range(layer_num):

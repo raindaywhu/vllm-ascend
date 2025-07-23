@@ -29,7 +29,7 @@ class EplbAdaptor():
         raise NotImplementedError
 
     @abstractmethod
-    def get_init_expert_map(self, num_moe_layers=None):
+    def get_init_expert_map(self, num_moe_layers: Any) -> Any:
         raise NotImplementedError
 
     @abstractmethod

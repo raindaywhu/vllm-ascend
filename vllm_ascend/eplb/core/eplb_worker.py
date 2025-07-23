@@ -24,6 +24,7 @@ import logging
 import torch.distributed as dist
 from multiprocessing import Process, Queue, Manager
 from abc import ABC, abstractmethod
+from typing import Any
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
