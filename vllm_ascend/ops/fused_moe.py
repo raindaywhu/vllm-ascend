@@ -159,6 +159,8 @@ def fused_experts_with_mc2(
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
     a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
 
+    enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
+
     moe_expert_num = len(expert_map)
     kwargs_mc2 = {
         "x": hidden_states,
@@ -182,16 +184,19 @@ def fused_experts_with_mc2(
             "tp_world_size": 1,
             "tp_rank_id": 0,
         })
-    if a3_need_extra_args:
+    if a3_need_extra_args and enable_dispatch_v2:
         stage1_kwargs.update({
             "x_active_mask": mc2_mask,
         })
 
     kwargs_mc2.update(stage1_kwargs)
 
-    output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
+    output = torch_npu.npu_moe_distribute_dispatch_v2(
+        **kwargs_mc2
+    ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_dispatch(
+        **kwargs_mc2)
     # comm_stream.wait_stream(torch.npu.current_stream())
-    expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
+    expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, ep_recv_counts = output[
         0:5]
 
     if shared_experts is not None:
@@ -234,7 +239,6 @@ def fused_experts_with_mc2(
     kwargs_mc2 = {
         "expand_x": down_out_list,
         "expert_ids": topk_ids,
-        "expand_idx": expand_idx,
         "expert_scales": topk_weights.to(torch.float32),
         "expert_shard_type": 0,
         "shared_expert_rank_num": 0,
@@ -248,6 +252,15 @@ def fused_experts_with_mc2(
         "ep_world_size": ep_world_size,
         "ep_rank_id": ep_rank_id,
     }
+    if enable_dispatch_v2:
+        stage3_kwargs.update({
+            "assist_info_for_combine":
+            assist_info_for_combine,
+        })
+    else:
+        stage3_kwargs.update({
+            "expand_idx": assist_info_for_combine,
+        })
     if need_extra_args:
         stage3_kwargs.update({
             "tp_send_counts": tp_recv_counts,
@@ -255,13 +268,16 @@ def fused_experts_with_mc2(
             "tp_world_size": 1,
             "tp_rank_id": 0,
         })
-    if a3_need_extra_args:
+    if a3_need_extra_args and enable_dispatch_v2:
         stage3_kwargs.update({
             "x_active_mask": mc2_mask,
         })
     kwargs_mc2.update(stage3_kwargs)
 
-    hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
+    hidden_states = torch_npu.npu_moe_distribute_combine_v2(
+        **kwargs_mc2
+    ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
+        **kwargs_mc2)
 
     if shared_experts is None:
         return hidden_states
@@ -861,8 +877,23 @@ def select_experts(
         ValueError: If an unsupported scoring function is provided.
     """
 
+    def _renormalize_topk_weights(
+        topk_weights: torch.Tensor,
+        renormalize: bool,
+    ):
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                           keepdim=True)
+        return topk_weights
+
     if scoring_func == "softmax":
         # NOTE: vLLM use dtype=torch.float here
+        if not use_grouped_topk and custom_routing_function is None:
+            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
+                x=router_logits, finished=None, k=top_k)
+            topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+            return topk_weights, topk_ids
+
         topk_weights = router_logits.softmax(dim=-1)
     elif scoring_func == "sigmoid":
         topk_weights = router_logits.sigmoid()
@@ -896,10 +927,11 @@ def select_experts(
                                                 k=top_k,
                                                 dim=-1,
                                                 sorted=False)
-    elif custom_routing_function is None:
-        topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
-        topk_weights = topk_weights.to(hidden_states.dtype)
-    else:
+        topk_ids = topk_ids.to(torch.int32)
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        return topk_weights, topk_ids
+
+    if custom_routing_function is not None:
         topk_weights, topk_ids = custom_routing_function(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -910,11 +942,12 @@ def select_experts(
         topk_ids = topk_ids.to(torch.int32)
         return topk_weights, topk_ids
 
+    topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
+    topk_weights = topk_weights.to(hidden_states.dtype)
+
     # Required by npu_moe_init_routing
     topk_ids = topk_ids.to(torch.int32)
-
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
 
@@ -1279,15 +1312,18 @@ class AscendFusedMoE(FusedMoE):
         mc2_mask = forward_context.mc2_mask
         tp_size = get_tensor_model_parallel_world_size()
         if fused_moe_state != FusedMoEState.AllGather:
-            if num_tokens < forward_context.padded_num_tokens:
+            if fused_moe_state in {
+                    FusedMoEState.MC2, FusedMoEState.MC2_PREFILL
+            }:
+                padding_size = forward_context.padded_num_tokens
+            else:
+                # TODO: Determine if we can remove the padding
+                padding_size = tp_size
+            if num_tokens < padding_size:
                 hidden_states = nn.functional.pad(
-                    hidden_states,
-                    (0, 0, 0, forward_context.padded_num_tokens - num_tokens),
-                )
+                    hidden_states, (0, 0, 0, padding_size - num_tokens))
                 router_logits = nn.functional.pad(
-                    router_logits,
-                    (0, 0, 0, forward_context.padded_num_tokens - num_tokens),
-                )
+                    router_logits, (0, 0, 0, padding_size - num_tokens))
             if tp_size > 1:
                 chunk_hidden_states = torch.tensor_split(hidden_states,
                                                          tp_size,
@@ -1355,10 +1391,6 @@ class AscendFusedMoE(FusedMoE):
         if self.dynamic_eplb:
             self.moe_load += expert_token_num if group_list_type else \
                 torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
-
-        # if shared_experts:
-        #     if isinstance(e_hidden_states, tuple):
-        #         e_hidden_states, shared_hidden_states = e_hidden_states
 
         if fused_moe_state != FusedMoEState.AllGather:
             if tp_size > 1:

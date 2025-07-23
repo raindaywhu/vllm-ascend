@@ -11,7 +11,6 @@ class DynamicConfig:
 
 
 class EplbPolicy:
-
     def __init__(self, config: DynamicConfig):
         self.config = config
 

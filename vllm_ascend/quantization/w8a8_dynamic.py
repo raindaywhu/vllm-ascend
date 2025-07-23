@@ -237,6 +237,8 @@ def fused_experts_with_mc2(
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
     a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
 
+    enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
+
     if (expert_map is not None):
         moe_expert_num = len(expert_map) + global_redundant_expert_num
     else:
@@ -264,15 +266,18 @@ def fused_experts_with_mc2(
             "tp_world_size": 1,
             "tp_rank_id": 0,
         })
-    if a3_need_extra_args:
+    if a3_need_extra_args and enable_dispatch_v2:
         stage1_kwargs.update({
             "x_active_mask": mc2_mask,
         })
     kwargs_mc2.update(stage1_kwargs)
 
-    output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
+    output = torch_npu.npu_moe_distribute_dispatch_v2(
+        **kwargs_mc2
+    ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_dispatch(
+        **kwargs_mc2)
     # comm_stream.wait_stream(torch.npu.current_stream())
-    expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
+    expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, ep_recv_counts = output[
         0:5]
 
     if shared_experts is not None:
@@ -283,19 +288,30 @@ def fused_experts_with_mc2(
             shared_act, swiglu_out_scale = shared_act_out[0], shared_act_out[1]
 
     # `expand_x` will be disposed in the `apply_mlp` function
-    down_out_list = apply_mlp_decode([expand_x],
-                                     w1,
-                                     w1_scale,
-                                     w2,
-                                     w2_scale,
-                                     expert_token_nums,
-                                     dynamic_scale=dynamic_scale)
+    if w1_scale_bias is None:
+        down_out_list = apply_mlp_decode([expand_x],
+                                         w1,
+                                         w1_scale,
+                                         w2,
+                                         w2_scale,
+                                         expert_token_nums,
+                                         dynamic_scale=dynamic_scale)
+    else:
+        # w4a8 scene, cannot use apply_mlp_decode because the operator is not supported
+        down_out_list = apply_mlp(expand_x,
+                                  w1,
+                                  w1_scale,
+                                  w2,
+                                  w2_scale,
+                                  expert_token_nums,
+                                  dynamic_scale=dynamic_scale,
+                                  w1_scale_bias=w1_scale_bias,
+                                  w2_scale_bias=w2_scale_bias)
 
     # moeCombine
     kwargs_mc2 = {
         "expand_x": down_out_list,
         "expert_ids": topk_ids,
-        "expand_idx": expand_idx,
         "expert_scales": topk_weights.to(torch.float32),
         "expert_shard_type": 0,
         "shared_expert_rank_num": 0,
@@ -311,6 +327,15 @@ def fused_experts_with_mc2(
         "ep_world_size": ep_world_size,
         "ep_rank_id": ep_rank_id,
     }
+    if enable_dispatch_v2:
+        stage3_kwargs.update({
+            "assist_info_for_combine":
+            assist_info_for_combine,
+        })
+    else:
+        stage3_kwargs.update({
+            "expand_idx": assist_info_for_combine,
+        })
     if need_extra_args:
         stage3_kwargs.update({
             "tp_send_counts": tp_recv_counts,
@@ -318,13 +343,16 @@ def fused_experts_with_mc2(
             "tp_world_size": 1,
             "tp_rank_id": 0,
         })
-    if a3_need_extra_args:
+    if a3_need_extra_args and enable_dispatch_v2:
         stage3_kwargs.update({
             "x_active_mask": mc2_mask,
         })
     kwargs_mc2.update(stage3_kwargs)
 
-    hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
+    hidden_states = torch_npu.npu_moe_distribute_combine_v2(
+        **kwargs_mc2
+    ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
+        **kwargs_mc2)
 
     group_list_type = 1
     if shared_experts is None:
@@ -410,18 +438,22 @@ def fused_prefill_experts_with_mc2(
         end_indx += hidden_states_chunk.shape[0]
         if shared_experts is None:
             hidden_states_outputs[start_indx:end_indx,
-                                  ...] = prefill_expert_outputs
+                                  ...] = prefill_expert_outputs[0]
+            expert_token_nums = prefill_expert_outputs[1]
+            group_list_type = prefill_expert_outputs[2]
         else:
             hidden_states_outputs[start_indx:end_indx,
                                   ...] = prefill_expert_outputs[0]
             shared_outputs[start_indx:end_indx,
                            ...] = prefill_expert_outputs[1]
+            expert_token_nums = prefill_expert_outputs[2]
+            group_list_type = prefill_expert_outputs[3]
         start_indx = end_indx
 
     if shared_experts is None:
-        return hidden_states_outputs
+        return hidden_states_outputs, expert_token_nums, group_list_type
     else:
-        return hidden_states_outputs, shared_outputs
+        return hidden_states_outputs, shared_outputs, expert_token_nums, group_list_type
 
 
 # currently expert parallelism implemented with all2all

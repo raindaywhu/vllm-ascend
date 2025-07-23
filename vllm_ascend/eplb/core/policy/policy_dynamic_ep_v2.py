@@ -13,7 +13,6 @@ class DynamicConfig:
 
 
 class EplbPolicy:
-
     def __init__(self, config: DynamicConfig):
         self.config = config
 
@@ -42,7 +41,6 @@ class EplbPolicy:
         """
         pass
 
-
 class DynamicTable:
     # workload_table:
     # 3D matrix: [layer, gpus, experts_per_gpu_per_layer] -> value: workload (heat) at the corresponding position
@@ -57,7 +55,6 @@ class DynamicTable:
     # The element at (i, j, k) represents the physical expert ID of the k-th expert on the j-th GPU in the i-th layer
     # For experts that are not available or collected, the value is set to -1
     placement_table = None
-
 
 class DynamicEplbV2(EplbPolicy):
 
