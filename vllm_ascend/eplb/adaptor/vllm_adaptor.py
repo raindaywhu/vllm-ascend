@@ -20,6 +20,7 @@ import torch
 import random
 import torch.distributed as dist
 import numpy as np
+from typing import Any
 
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 from vllm.logger import logger

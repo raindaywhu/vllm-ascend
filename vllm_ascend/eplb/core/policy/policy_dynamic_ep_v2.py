@@ -699,7 +699,7 @@ class DynamicEplbV2(EplbPolicy):
                 f"The number of NPUs ({num_npus}) must be greater than or equal to the number of redundant experts ({num_redundancy_expert})"
             )
 
-        global_deployment: list[list[list[int]]] = [[[] for _ in range(num_devices)] for _ in range(layer_num)]
+        global_deployment: list[list[list[int]]] = [[[] for _ in range(num_npus)] for _ in range(layer_num)]
         layer_initial_imbalance = self.calculate_initial_imbalance(
             info.placement_table, layer_workloads)
         max_heat_per_layer_after = np.zeros([layer_num])
@@ -713,7 +713,7 @@ class DynamicEplbV2(EplbPolicy):
             ave_workload = self.safe_divide(np.sum(layer_workloads[layer]),
                                             num_npus)
 
-            rendun_pos: list[list[int]] = [[] for _ in range(num_devices)]
+            rendun_pos: list[list[int]] = [[] for _ in range(num_npus)]
             existing_experts = set()
             for device_id, device in enumerate(info.placement_table[layer]):
                 for index, expert_id in enumerate(device):

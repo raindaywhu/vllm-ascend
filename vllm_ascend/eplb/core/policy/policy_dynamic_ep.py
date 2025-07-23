@@ -33,7 +33,7 @@ class DynamicEplb(EplbPolicy):
         layer_num, npu_num, experts_per_npu = expert_workload.shape
         workload_new = np.zeros((layer_num, num_original_expert))
         for layer_idx in range(layer_num):
-            wworkload_dict: dict[int, int] = defaultdict(int)
+            workload_dict: dict[int, int] = defaultdict(int)
             placement_layer = current_expert_table[layer_idx].copy()
             workload_layer = expert_workload[layer_idx].copy()
             for npu_idx in range(npu_num):
@@ -51,7 +51,7 @@ class DynamicEplb(EplbPolicy):
         # Step 1: Sort the items by weight in descending order (we are sorting by weight now)
         # Sort based on the second element (the second value of each tuple)
         route_expert_num = len(origin_weights)
-        route_expert_redundancy: list[list[int]] = [[] for _ in range(n)]
+        route_expert_redundancy: list[list[int]] = [[] for _ in range(route_expert_num)]
         for i in range(num_redundancy_expert):
             sorted_indices = np.argsort([t[1] for t in origin_weights],
                                         kind='stable')[::-1]
@@ -136,7 +136,7 @@ class DynamicEplb(EplbPolicy):
     def compute_balanced_pack_redundancy(origin_weights, card_num,
                                          num_redundancy_expert):
         route_expert_num = len(origin_weights)
-        route_expert_redundancy: list[list[int]] = [[] for _ in range(n)]
+        route_expert_redundancy: list[list[int]] = [[] for _ in range(route_expert_num)]
         for i in range(num_redundancy_expert):
             sorted_indices = np.argsort([t[1] for t in origin_weights],
                                         kind='stable')[::-1]
