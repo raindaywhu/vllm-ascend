@@ -13,6 +13,7 @@ class DynamicConfig:
 
 
 class EplbPolicy:
+
     def __init__(self, config: DynamicConfig):
         self.config = config
 
@@ -41,6 +42,7 @@ class EplbPolicy:
         """
         pass
 
+
 class DynamicTable:
     # workload_table:
     # 3D matrix: [layer, gpus, experts_per_gpu_per_layer] -> value: workload (heat) at the corresponding position
@@ -55,6 +57,7 @@ class DynamicTable:
     # The element at (i, j, k) represents the physical expert ID of the k-th expert on the j-th GPU in the i-th layer
     # For experts that are not available or collected, the value is set to -1
     placement_table = None
+
 
 class DynamicEplbV2(EplbPolicy):
 
@@ -147,7 +150,8 @@ class DynamicEplbV2(EplbPolicy):
     def compute_redundant_assignments(self, base_experts,
                                       num_redundant_experts, num_experts):
 
-        redundant_assignments: list[list[int]] = [[] for _ in range(num_experts)]
+        redundant_assignments: list[list[int]] = [[]
+                                                  for _ in range(num_experts)]
         current_weights = base_experts.copy()
 
         for i in range(num_redundant_experts):
@@ -297,7 +301,8 @@ class DynamicEplbV2(EplbPolicy):
                                  num_experts, rendun_pos):
 
         num_devices = len(device_assignments)
-        com_between_devices: list[dict[int, int]] = [{} for _ in range(num_devices)]
+        com_between_devices: list[dict[int,
+                                       int]] = [{} for _ in range(num_devices)]
 
         for expert_id, weight in redundant_expert_list:
             candidate = -1
@@ -696,7 +701,9 @@ class DynamicEplbV2(EplbPolicy):
                 f"The number of NPUs ({num_npus}) must be greater than or equal to the number of redundant experts ({num_redundancy_expert})"
             )
 
-        global_deployment: list[list[list[int]]] = [[[] for _ in range(num_npus)] for _ in range(layer_num)]
+        global_deployment: list[list[list[int]]] = [[[]
+                                                     for _ in range(num_npus)]
+                                                    for _ in range(layer_num)]
         layer_initial_imbalance = self.calculate_initial_imbalance(
             info.placement_table, layer_workloads)
         max_heat_per_layer_after = np.zeros([layer_num])

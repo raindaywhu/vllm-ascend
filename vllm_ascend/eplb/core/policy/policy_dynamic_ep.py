@@ -51,7 +51,9 @@ class DynamicEplb(EplbPolicy):
         # Step 1: Sort the items by weight in descending order (we are sorting by weight now)
         # Sort based on the second element (the second value of each tuple)
         route_expert_num = len(origin_weights)
-        route_expert_redundancy: list[list[int]] = [[] for _ in range(route_expert_num)]
+        route_expert_redundancy: list[list[int]] = [
+            [] for _ in range(route_expert_num)
+        ]
         for i in range(num_redundancy_expert):
             sorted_indices = np.argsort([t[1] for t in origin_weights],
                                         kind='stable')[::-1]
@@ -136,7 +138,9 @@ class DynamicEplb(EplbPolicy):
     def compute_balanced_pack_redundancy(origin_weights, card_num,
                                          num_redundancy_expert):
         route_expert_num = len(origin_weights)
-        route_expert_redundancy: list[list[int]] = [[] for _ in range(route_expert_num)]
+        route_expert_redundancy: list[list[int]] = [
+            [] for _ in range(route_expert_num)
+        ]
         for i in range(num_redundancy_expert):
             sorted_indices = np.argsort([t[1] for t in origin_weights],
                                         kind='stable')[::-1]
@@ -343,7 +347,9 @@ class DynamicEplb(EplbPolicy):
             )
 
         # Number of experts deployed on each card includes one redundant expert
-        global_deployment: list[list[list[int]]] = [[[] for _ in range(num_npus)] for _ in range(layer_num)]
+        global_deployment: list[list[list[int]]] = [[[]
+                                                     for _ in range(num_npus)]
+                                                    for _ in range(layer_num)]
         # Iterate to obtain the placement strategy for each layer, taking computational balance into account
         max_heat_per_layer_after = np.zeros([layer_num])
         for layer in range(layer_num):
