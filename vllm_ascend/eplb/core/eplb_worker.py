@@ -24,6 +24,7 @@ import logging
 import torch.distributed as dist
 from multiprocessing import Process, Queue, Manager
 from abc import ABC, abstractmethod
+from typing import Any
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
@@ -32,14 +33,19 @@ from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
 
 class EplbWorker:
 
-    def __init__(self, shared_dict, policy_type, enable_d2d: bool = True, redundant_enable=0):
+    def __init__(self,
+                 shared_dict,
+                 policy_type,
+                 enable_d2d: bool = True,
+                 redundant_enable=0):
         self.policy_type = policy_type
-        self.policy = PolicyFactory.generate_policy(policy_type, DynamicConfig())
+        self.policy = PolicyFactory.generate_policy(policy_type,
+                                                    DynamicConfig())
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
         self.redundant_enable = redundant_enable
-        self.rank_id  = dist.get_rank()
+        self.rank_id = dist.get_rank()
 
     def do_update(self):
         # put data in to queue
@@ -64,8 +70,10 @@ class EplbWorker:
             return
 
         # Get the updated expert table based on the workload information
-        old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
-        _, _, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
+        old_placement = self.global2local(self.old_expert_maps,
+                                          self.num_local_experts)
+        _, _, new_placement = self.calculate_rebalance_experts(
+            load_info, old_placement)
 
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
@@ -74,7 +82,8 @@ class EplbWorker:
         self.update_expert_map(new_expert_maps)
         logger.debug(f"[EPLB Process  new_map differs, performing D2D")
 
-        update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
+        update_info = self.compose_expert_update_info_greedy(
+            new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
         logger.info("EPLB Process compute complete")
 
@@ -88,8 +97,11 @@ class EplbWorker:
 
         for layer_id in range(num_layers):
             # check if any logical expert is not placed on any rank
-            if torch.unique(new_placement[layer_id]).numel() < torch.unique(old_placement[layer_id]).numel():
-                logger.error(f"There exists expert not placed on any rank in layer {layer_id}")
+            if torch.unique(new_placement[layer_id]).numel() < torch.unique(
+                    old_placement[layer_id]).numel():
+                logger.error(
+                    f"There exists expert not placed on any rank in layer {layer_id}"
+                )
                 new_placement[layer_id] = old_placement[layer_id]
                 continue
 
@@ -98,19 +110,27 @@ class EplbWorker:
                 old_placement_check = old_placement[layer_id][rank_id]
 
                 # check if same logical experts are placed on the same NPU
-                if new_placement_check.numel() != torch.unique(new_placement_check).numel():
-                    logger.error(f"Replicated experts are placed on the same NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid")
+                if new_placement_check.numel() != torch.unique(
+                        new_placement_check).numel():
+                    logger.error(
+                        f"Replicated experts are placed on the same NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid"
+                    )
                     new_placement[layer_id] = old_placement[layer_id]
                     break
 
                 # check if there is any experts movement inside one NPU
-                expert_not_move = torch.isin(new_placement_check, old_placement_check)
-                if not torch.equal(new_placement_check[expert_not_move], old_placement_check[expert_not_move]):
-                    logger.error(f"There exists expert movement inside NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid")
+                expert_not_move = torch.isin(new_placement_check,
+                                             old_placement_check)
+                if not torch.equal(new_placement_check[expert_not_move],
+                                   old_placement_check[expert_not_move]):
+                    logger.error(
+                        f"There exists expert movement inside NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid"
+                    )
                     new_placement[layer_id] = old_placement[layer_id]
                     break
 
-    def compose_expert_update_info_bipartite(self, updated_expert_maps_org, current_expert_maps_org):
+    def compose_expert_update_info_bipartite(self, updated_expert_maps_org,
+                                             current_expert_maps_org):
         # transform numpy array to torch tensor
         updated_expert_maps = updated_expert_maps_org.clone()
         current_expert_maps = current_expert_maps_org.clone()
@@ -124,7 +144,8 @@ class EplbWorker:
         for layer_id in range(num_layers):
             updated_expert_maps_this_layer = updated_expert_maps[layer_id]
             current_expert_maps_this_layer = current_expert_maps[layer_id]
-            updated_expert_maps_this_layer_org = updated_expert_maps_org[layer_id]
+            updated_expert_maps_this_layer_org = updated_expert_maps_org[
+                layer_id]
 
             from typing import Any
 
@@ -133,13 +154,15 @@ class EplbWorker:
 
             # Guard Clause: if there is no expert weight update, avoid subsequent processing
             if (np.equal(updated_expert_maps_this_layer,
-                        current_expert_maps_this_layer)).all():
-                yield (expert_send_info_this_layer, expert_recv_info_this_layer,
-                    updated_expert_maps_this_layer_org, layer_id)
+                         current_expert_maps_this_layer)).all():
+                yield (expert_send_info_this_layer,
+                       expert_recv_info_this_layer,
+                       updated_expert_maps_this_layer_org, layer_id)
 
             # Parse expert_ids each rank needs to receive from other ranks
-            dst_rank_indices, experts_to_recv = np.where((current_expert_maps_this_layer == -1)
-                                                        & (updated_expert_maps_this_layer != -1))
+            dst_rank_indices, experts_to_recv = np.where(
+                (current_expert_maps_this_layer == -1)
+                & (updated_expert_maps_this_layer != -1))
 
             # record src ranks for potential transfer
             src_ranks_set = dict()
@@ -158,20 +181,24 @@ class EplbWorker:
                     expert_id = experts_to_recv[idx].item()
                     # add src ranks
                     src_rank_ids = src_ranks_set[expert_id]
-                    graph_expert_update.add_nodes_from(src_rank_ids, bipartite=0)
+                    graph_expert_update.add_nodes_from(src_rank_ids,
+                                                       bipartite=0)
                     # add dest rank
                     graph_expert_update.add_node(str(dst_rank_id), bipartite=1)
                     # add edges
                     for src_rank_id in src_rank_ids:
-                        graph_expert_update.add_edge(src_rank_id, str(dst_rank_id))
+                        graph_expert_update.add_edge(src_rank_id,
+                                                     str(dst_rank_id))
 
                 # graph may not be connected
-                connected_components = list(nx.connected_components(graph_expert_update))
+                connected_components = list(
+                    nx.connected_components(graph_expert_update))
                 all_matches = {}
                 # matching in this loop
                 for i, component in enumerate(connected_components):
                     subgraph = graph_expert_update.subgraph(component)
-                    component_matching = nx.bipartite.maximum_matching(subgraph)
+                    component_matching = nx.bipartite.maximum_matching(
+                        subgraph)
                     all_matches.update(component_matching)
 
                 for src_rank, dst_rank in all_matches.items():
@@ -182,30 +209,38 @@ class EplbWorker:
                         experts_v = experts_to_recv[np.where(
                             dst_rank_indices == dst_rank)]
                         # src: src_rank, dest: dst_rank, expert: expert_id
-                        expert_id = np.intersect1d(experts_v, np.where(
-                            current_expert_maps_this_layer[src_rank] != -1))[0]
+                        expert_id = np.intersect1d(
+                            experts_v,
+                            np.where(
+                                current_expert_maps_this_layer[src_rank] != -1)
+                        )[0]
 
                         # record send/rcv pairs
                         if src_rank not in expert_send_info_this_layer:
                             expert_send_info_this_layer[src_rank] = []
                         if dst_rank not in expert_recv_info_this_layer:
                             expert_recv_info_this_layer[dst_rank] = []
-                        expert_send_info_this_layer[src_rank].append((dst_rank, expert_id))
-                        expert_recv_info_this_layer[dst_rank].append((src_rank, expert_id))
+                        expert_send_info_this_layer[src_rank].append(
+                            (dst_rank, expert_id))
+                        expert_recv_info_this_layer[dst_rank].append(
+                            (src_rank, expert_id))
 
-                        remove_index = np.where(np.logical_and(
-                            dst_rank_indices == dst_rank, experts_to_recv == expert_id))
+                        remove_index = np.where(
+                            np.logical_and(dst_rank_indices == dst_rank,
+                                           experts_to_recv == expert_id))
 
                         # update
-                        dst_rank_indices = np.delete(
-                            dst_rank_indices, remove_index)
-                        experts_to_recv = np.delete(experts_to_recv, remove_index)
+                        dst_rank_indices = np.delete(dst_rank_indices,
+                                                     remove_index)
+                        experts_to_recv = np.delete(experts_to_recv,
+                                                    remove_index)
 
             yield (expert_send_info_this_layer, expert_recv_info_this_layer,
-                updated_expert_maps_this_layer_org, layer_id)
+                   updated_expert_maps_this_layer_org, layer_id)
 
     # TODO: Here only expert weight exchange is considered, need to be extended to cover other weight update cases
-    def compose_expert_update_info_greedy(self, updated_expert_maps, current_expert_maps):
+    def compose_expert_update_info_greedy(self, updated_expert_maps,
+                                          current_expert_maps):
         num_layers = current_expert_maps.shape[0]
         num_ranks = current_expert_maps.shape[1]
         num_experts = current_expert_maps.shape[2]
@@ -218,8 +253,11 @@ class EplbWorker:
             expert_recv_info_this_layer: dict[Any, Any] = {}
 
             # Guard Clause: if there is no expert weight update, avoid subsequent processing
-            if torch.equal(updated_expert_maps_this_layer, current_expert_maps_this_layer):
-                yield (expert_send_info_this_layer, expert_recv_info_this_layer, updated_expert_maps_this_layer, layer_id)
+            if torch.equal(updated_expert_maps_this_layer,
+                           current_expert_maps_this_layer):
+                yield (expert_send_info_this_layer,
+                       expert_recv_info_this_layer,
+                       updated_expert_maps_this_layer, layer_id)
 
             # Parse expert_ids each rank needs to receive from other ranks
             dst_rank_indices, experts_to_recv = torch.where((current_expert_maps_this_layer == -1) \
@@ -235,22 +273,27 @@ class EplbWorker:
                 if dst_rank_id not in expert_recv_info_this_layer:
                     expert_recv_info_this_layer[dst_rank_id] = []
 
-                if not torch.isin(torch.tensor(expert_id), experts_to_send).any():
+                if not torch.isin(torch.tensor(expert_id),
+                                  experts_to_send).any():
                     # if expert_id are not sent out from any npu, it will be copied from one npu holding this expert
-                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, expert_id] != -1)[0]
+                    candidate_src_rank_indices = torch.where(
+                        current_expert_maps_this_layer[:, expert_id] != -1)[0]
                 else:
-                    candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
+                    candidate_src_rank_indices = src_rank_indices[
+                        experts_to_send == expert_id]
 
                 #TODO: improve selection criterion of npu sending expert_id considering such as intra-node or inter-node...
                 src_rank_id = candidate_src_rank_indices[0].item()
                 if src_rank_id not in expert_send_info_this_layer:
                     expert_send_info_this_layer[src_rank_id] = []
 
-                expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
-                expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
+                expert_send_info_this_layer[src_rank_id].append(
+                    (dst_rank_id, expert_id))
+                expert_recv_info_this_layer[dst_rank_id].append(
+                    (src_rank_id, expert_id))
 
-            yield (expert_send_info_this_layer, expert_recv_info_this_layer, updated_expert_maps_this_layer, layer_id)
-
+            yield (expert_send_info_this_layer, expert_recv_info_this_layer,
+                   updated_expert_maps_this_layer, layer_id)
 
     def calculate_rebalance_experts(self, load_info, old_placement):
         """
@@ -259,7 +302,8 @@ class EplbWorker:
         if self.old_expert_maps is None:
             return False, None, None
 
-        changed, priority, new_map = self.policy.rebalance_experts(old_placement, load_info)
+        changed, priority, new_map = self.policy.rebalance_experts(
+            old_placement, load_info)
         return changed, priority, new_map
 
     def get_init_expert_maps(self):
@@ -279,10 +323,8 @@ class EplbWorker:
 
         self.shared_dict["expert_maps"] = expert_maps
 
-    def global2local(self,
-        placement: torch.Tensor,
-        E_local: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def global2local(self, placement: torch.Tensor,
+                     E_local: int) -> tuple[torch.Tensor, torch.Tensor]:
 
         L, G, _ = placement.shape
         device = placement.device
@@ -301,10 +343,7 @@ class EplbWorker:
 
         return pt_local
 
-
-    def local2global(self,
-        placement_local: torch.Tensor
-    ) -> torch.Tensor:
+    def local2global(self, placement_local: torch.Tensor) -> torch.Tensor:
 
         L, G, E_local = placement_local.shape
         device = placement_local.device
@@ -340,8 +379,10 @@ class EplbWorker:
 
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
 
-            send_info_this_rank = send_info[self.rank_id] if self.rank_id in send_info else []
-            recv_info_this_rank = recv_info[self.rank_id] if self.rank_id in recv_info else []
+            send_info_this_rank = send_info[
+                self.rank_id] if self.rank_id in send_info else []
+            recv_info_this_rank = recv_info[
+                self.rank_id] if self.rank_id in recv_info else []
             send_all.append(send_info_this_rank)
             recv_all.append(recv_info_this_rank)
 
@@ -357,8 +398,16 @@ class EplbWorker:
 
         return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
 
+
 class EplbProcess:
-    def __init__(self, shared_dict, planner_q, block_update_q, redundant_enable, policy_type: int = 0, enable_d2d: bool = True):
+
+    def __init__(self,
+                 shared_dict,
+                 planner_q,
+                 block_update_q,
+                 redundant_enable,
+                 policy_type: int = 0,
+                 enable_d2d: bool = True):
         """
         Args:
             shared_dict: Cross-process shared dict returned by Manager().dict()
@@ -373,8 +422,8 @@ class EplbProcess:
         self.redundant_enable = redundant_enable
 
         # Create EplbWorker instance
-        self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d, self.redundant_enable)
-
+        self.worker = EplbWorker(self.shared_dict, self.policy_type,
+                                 self.enable_d2d, self.redundant_enable)
 
     def worker_process(self, planner_q, block_update_q):
         """
@@ -394,19 +443,17 @@ class EplbProcess:
                     break
 
             except Exception as e:
-                logger.warning(f"[EPLB subprocess Exiting due to error: {e}", exc_info=True)
+                logger.warning(f"[EPLB subprocess Exiting due to error: {e}",
+                               exc_info=True)
                 break
 
     def _launch_process(self):
         """
         Use spawn method to launch subprocess and return (planner_q, block_update_q, proc).
         """
-        proc = Process(
-            target=self.worker_process,
-            args=(self.planner_q,self.block_update_q),
-            daemon=True
-        )
+        proc = Process(target=self.worker_process,
+                       args=(self.planner_q, self.block_update_q),
+                       daemon=True)
 
         proc.start()
-        return  proc
-
+        return proc

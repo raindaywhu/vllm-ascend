@@ -8,7 +8,9 @@ from .policy_abstract import EplbPolicy, DynamicConfig
 
 random.seed(42)
 
+
 class RandomLoadBalance(EplbPolicy):
+
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
 
@@ -20,7 +22,7 @@ class RandomLoadBalance(EplbPolicy):
         for i in range(num_layers):
             # randomly choose two card
             # indices = random.sample(range(num_card), 2)
-            indices = [3,1]
+            indices = [3, 1]
 
             # swap redundant experts
             expert_id_to_exchange = new_table[i][indices[0]][-1].clone()
