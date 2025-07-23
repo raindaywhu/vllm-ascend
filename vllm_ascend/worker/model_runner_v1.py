@@ -394,7 +394,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #EPLB
         self.dynamic_eplb = ascend_config.dynamic_eplb
         if self.dynamic_eplb == True:
-            self.eplb_adaptor = None
+            self.eplb_adaptor: Optional[VllmEplbAdaptor] = None
             self.is_eplb_warmuped = False
             self.eplb_updator = EplbUpdator(ascend_config.expert_map_path)
 

@@ -219,7 +219,10 @@ def fused_experts_with_mc2(
     quantized_x_for_share: Optional[Any] = None,
     dynamic_scale_for_share: Optional[Any] = None,
     mc2_mask: Optional[torch.Tensor] = None,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+) -> Union[
+    Tuple[torch.Tensor, torch.Tensor, int],  # when shared_experts is None
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]  # when shared_experts is not None
+]:
     assert mc2_mask is not None
     if log2phy is not None:
         topk_ids = log2phy[topk_ids]

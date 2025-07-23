@@ -1431,7 +1431,8 @@ class AscendFusedMoE(FusedMoE):
         return self.log2phy
 
     def clear_moe_load(self):
-        self.moe_load.zero_()
+        if self.moe_load is not None:
+            self.moe_load.zero_()
 
     # ----------------------------------------- TBO-related --------------------------------------------
 
