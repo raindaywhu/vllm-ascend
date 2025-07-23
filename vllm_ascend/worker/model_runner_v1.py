@@ -88,7 +88,7 @@ from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -1805,12 +1805,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, logits
         self.encoder_cache.clear()
         gc.collect()
-
-    def do_get_expert_load(self) ->  tuple:
-        return self.eplb_updator.get_expert_load()
-
-    def do_update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
-        return self.eplb_updator.update_expert_load_statistical_period(num_expert_load_gather, num_iterations)
 
     def eplb_warmup(self):
         #EPLB
