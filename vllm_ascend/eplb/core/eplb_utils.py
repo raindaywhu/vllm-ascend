@@ -48,21 +48,21 @@ def generate_log2phy_map(expert_map):
 
 def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
 
-    local_num_experts  = self.global_expert_num // self.world_size
+    local_num_experts  = global_expert_num // world_size
 
     expert_map_all = torch.full(
-        (self.world_size, self.global_expert_num), -1, dtype=torch.int32
+        (world_size, global_expert_num), -1, dtype=torch.int32
     )
 
-    for r in range(self.world_size):
-        if r < self.world_size - 1:
+    for r in range(world_size):
+        if r < world_size - 1:
             start = r * local_num_experts
             end   = (r + 1) * local_num_experts
             local_count = local_num_experts
         else:
             start = r * local_num_experts
-            end   = self.global_expert_num
-            local_count = self.global_expert_num - r * local_num_experts
+            end   = global_expert_num
+            local_count = global_expert_num - r * local_num_experts
 
         local_ids = torch.arange(local_count, dtype=torch.int32)
         expert_map_all[r, start:end] = local_ids

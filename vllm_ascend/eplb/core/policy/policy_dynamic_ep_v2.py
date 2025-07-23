@@ -2,6 +2,7 @@
 from collections import defaultdict
 import numpy as np
 from abc import abstractmethod
+from typing import DefaultDict, cast
 
 class DynamicConfig:
     placement_policy = None
@@ -85,8 +86,8 @@ class DynamicEplbV2(EplbPolicy):
     def add_redundant(current_expert_table, expert_workload, num_original_expert):
         layer_num, npu_num, experts_per_npu = expert_workload.shape
         workload_new = np.zeros((layer_num, num_original_expert))
-        for layer_idx in range(layer_num):
-            workload_dict = defaultdict(int)
+        for layer_idx in range(layer_num):  
+            workload_dict: DefaultDict[int, int] = defaultdict(int)
             placement_layer = current_expert_table[layer_idx].copy()
             workload_layer = expert_workload[layer_idx].copy()
             for npu_idx in range(npu_num):
@@ -98,12 +99,12 @@ class DynamicEplbV2(EplbPolicy):
 
     @staticmethod
     def get_redundant_num(npu_num, counts):
-        redundant_num_each_npu = np.sum(counts - 1)
+        redundant_num_each_npu: int = int(np.sum(counts - 1))
         return redundant_num_each_npu
 
     @staticmethod
     def calculate_max_heat_per_layer(workload_table, layer_num):
-        max_heat_per_layer = []
+        max_heat_per_layer: list[int] = []
         for layer_idx in range(layer_num):
             npu_heats_now = np.sum(workload_table[layer_idx], axis=1)
             max_heat_per_layer.append(np.max(npu_heats_now))
@@ -139,7 +140,7 @@ class DynamicEplbV2(EplbPolicy):
 
     def compute_redundant_assignments(self, base_experts, num_redundant_experts, num_experts):
 
-        redundant_assignments = [[] for _ in range(num_experts)]
+        redundant_assignments: list[list[int]] = [[] for _ in range(num_experts)]
         current_weights = base_experts.copy()
 
         for i in range(num_redundant_experts):
@@ -261,7 +262,7 @@ class DynamicEplbV2(EplbPolicy):
                                 expert_from_device, num_experts, rendun_pos):
 
         num_devices = len(device_assignments)
-        com_between_devices = [{} for _ in range(num_devices)]
+        com_between_devices: list[dict[int, int]] = [{} for _ in range(num_devices)]
 
         for expert_id, weight in redundant_expert_list:
             candidate = -1
@@ -592,8 +593,8 @@ class DynamicEplbV2(EplbPolicy):
 
     def rebalance_experts(self, current_expert_table, expert_workload, is_node_redundant = False, increment = 0.01):
         info = DynamicTable()
-        info.workload_table = expert_workload.numpy()
-        info.placement_table = current_expert_table.numpy()
+        info.workload_table = cast(np.ndarray, expert_workload.numpy())
+        info.placement_table = cast(np.ndarray, current_expert_table.numpy())
         layer_num, num_npus, experts_per_npu= info.workload_table.shape
         expert_ids, counts = np.unique(info.placement_table[0], return_counts=True)
         num_redundancy_expert = self.get_redundant_num(num_npus, counts)
