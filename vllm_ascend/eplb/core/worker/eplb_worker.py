@@ -25,6 +25,7 @@ import torch.distributed as dist
 from multiprocessing import Process, Queue, Manager
 from abc import ABC, abstractmethod
 from vllm.logger import logger
+from collections import deque
 
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
 from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils
@@ -108,97 +109,151 @@ class EplbWorker:
                     new_placement[layer_id] = old_placement[layer_id]
                     break
 
-    def compose_expert_update_info_bipartite(self, updated_expert_maps_org, current_expert_maps_org):
-        # transform numpy array to torch tensor
+    def dfs(self, u, visited, match, graph):
+        visited[u] = True
+        for v in graph[u]:
+            if not visited[v]:
+                visited[v] = True
+                if match[v] == -1 or self.dfs(match[v], visited, match, graph):
+                    match[v] = u
+                    match[u] = v
+                    return True
+        return False
+
+    def compose_expert_update_info_bipartite(self, updated_expert_maps_org, current_expert_maps_org, new_expert_maps):
+
         updated_expert_maps = updated_expert_maps_org.clone()
         current_expert_maps = current_expert_maps_org.clone()
         updated_expert_maps = np.array(updated_expert_maps)
         current_expert_maps = np.array(current_expert_maps)
 
         num_layers = current_expert_maps.shape[0]
-        num_ranks = current_expert_maps.shape[1]
-        num_experts = current_expert_maps.shape[2]
+        num_ranks = updated_expert_maps.shape[1]
 
         for layer_id in range(num_layers):
+
             updated_expert_maps_this_layer = updated_expert_maps[layer_id]
             current_expert_maps_this_layer = current_expert_maps[layer_id]
-            updated_expert_maps_this_layer_org = updated_expert_maps_org[layer_id]
+            updated_expert_maps_this_layer_org = new_expert_maps[layer_id]
 
             expert_send_info_this_layer = dict()
             expert_recv_info_this_layer = dict()
 
             # Guard Clause: if there is no expert weight update, avoid subsequent processing
             if (np.equal(updated_expert_maps_this_layer,
-                        current_expert_maps_this_layer)).all():
+                         current_expert_maps_this_layer)).all():
                 yield (expert_send_info_this_layer, expert_recv_info_this_layer,
-                    updated_expert_maps_this_layer_org, layer_id)
+                       updated_expert_maps_this_layer_org, layer_id)
 
-            # Parse expert_ids each rank needs to receive from other ranks
-            dst_rank_indices, experts_to_recv = np.where((current_expert_maps_this_layer == -1)
-                                                        & (updated_expert_maps_this_layer != -1))
+            # 解析每个rank需要接收的专家ID
+            dst_ranks_needed_experts = []
+            for rank_id in range(updated_expert_maps_this_layer.shape[0]):
+                for index in range(updated_expert_maps_this_layer.shape[1]):
+                    if current_expert_maps_this_layer[rank_id][index] != updated_expert_maps_this_layer[rank_id][index]:
+                        # 接收卡id为 rank索引
+                        dst_ranks_needed_experts.append((rank_id, updated_expert_maps_this_layer[rank_id][index]))
 
-            # record src ranks for potential transfer
-            src_ranks_set = dict()
-            for idx in range(len(dst_rank_indices)):
-                expert_id = experts_to_recv[idx].item()
+            # 为每个专家构建源rank集合
+            src_ranks_set = {}
+            for dst_ranks_info in dst_ranks_needed_experts:
+                expert_id = dst_ranks_info[1]
                 if expert_id not in src_ranks_set:
-                    src_ranks_set[expert_id] = np.where(
-                        current_expert_maps_this_layer[:, expert_id] != -1)[0]
+                    src_ranks_set[expert_id] = np.where(np.any(current_expert_maps_this_layer == expert_id, axis=1))[0]
 
-            # loop until all experts are scheduled
-            while len(dst_rank_indices) > 0:
-                # construct bipartite graph
-                graph_expert_update = nx.Graph()
-                for idx in range(len(dst_rank_indices)):
-                    dst_rank_id = dst_rank_indices[idx].item()
-                    expert_id = experts_to_recv[idx].item()
-                    # add src ranks
-                    src_rank_ids = src_ranks_set[expert_id]
-                    graph_expert_update.add_nodes_from(src_rank_ids, bipartite=0)
-                    # add dest rank
-                    graph_expert_update.add_node(str(dst_rank_id), bipartite=1)
-                    # add edges
-                    for src_rank_id in src_rank_ids:
-                        graph_expert_update.add_edge(src_rank_id, str(dst_rank_id))
+            # 处理直到没有需要接收的专家
+            while dst_ranks_needed_experts:
+                # 初始化二分图
+                graph = [[] for _ in range(2 * num_ranks)]
+                edge_added = [[False] * num_ranks for _ in range(num_ranks)]
 
-                # graph may not be connected
-                connected_components = list(nx.connected_components(graph_expert_update))
+                # 构建二分图
+                for dst_info in dst_ranks_needed_experts:
+                    d = dst_info[0]  # 目标rank
+                    e = dst_info[1]  # 专家ID
+                    if e in src_ranks_set:
+                        for s in src_ranks_set[e]:
+                            if not edge_added[s][d]:
+                                graph[s].append(d + num_ranks)
+                                graph[d + num_ranks].append(s)
+                                edge_added[s][d] = True
+
+                # 查找连通分量
+                visited_comp = [False] * (2 * num_ranks)
+                components = []
+                for i in range(2 * num_ranks):
+                    if not visited_comp[i] and graph[i]:
+                        comp = []
+                        q = deque([i])
+                        visited_comp[i] = True
+                        while q:
+                            u = q.popleft()
+                            comp.append(u)
+                            for v in graph[u]:
+                                if not visited_comp[v]:
+                                    visited_comp[v] = True
+                                    q.append(v)
+                        components.append(comp)
+
+                # 为每个连通分量查找最大匹配
+                match = [-1] * (2 * num_ranks)
+                for comp in components:
+                    comp_set = set(comp)
+                    comp_graph = [[] for _ in range(2 * num_ranks)]
+                    for u in comp:
+                        for v in graph[u]:
+                            if v in comp_set:
+                                comp_graph[u].append(v)
+
+                    # 对左侧节点运行DFS（匈牙利算法）
+                    for u in comp:
+                        if u < num_ranks:  # 左侧节点
+                            visited_dfs = [False] * (2 * num_ranks)
+                            self.dfs(u, visited_dfs, match, comp_graph)
+
+                # 收集所有匹配
                 all_matches = {}
-                # matching in this loop
-                for i, component in enumerate(connected_components):
-                    subgraph = graph_expert_update.subgraph(component)
-                    component_matching = nx.bipartite.maximum_matching(subgraph)
-                    all_matches.update(component_matching)
+                for v in range(num_ranks, 2 * num_ranks):
+                    if match[v] != -1:
+                        s = match[v]  # 源rank
+                        d = v - num_ranks  # 目标rank
+                        all_matches[s] = d
 
-                for src_rank, dst_rank in all_matches.items():
-                    dst_rank = int(dst_rank)
-                    assert src_rank != dst_rank
-                    if graph_expert_update.nodes[src_rank]['bipartite'] == 0:
-                        # currently not scheduled experts in rank dst_rank
-                        experts_v = experts_to_recv[np.where(
-                            dst_rank_indices == dst_rank)]
-                        # src: src_rank, dest: dst_rank, expert: expert_id
-                        expert_id = np.intersect1d(experts_v, np.where(
-                            current_expert_maps_this_layer[src_rank] != -1))[0]
+                # 处理匹配并更新专家信息
+                for source_rank_id, target_rank_id in all_matches.items():
+                    source_rank_placement = current_expert_maps_this_layer[source_rank_id]
 
+                    # 获取目标rank需要的专家
+                    needed_experts = []
+                    for dst_info in dst_ranks_needed_experts:
+                        if dst_info[0] == target_rank_id:
+                            needed_experts.append(dst_info[1])
+
+                    # 找到源rank中目标rank需要的专家
+                    expert_id = np.intersect1d(needed_experts, source_rank_placement)
+                    if expert_id.size > 0:
+                        recv_expert_id = expert_id[0]
+                        source_rank_id = int(source_rank_id)
+                        target_rank_id = int(target_rank_id)
+                        recv_expert_id = int(recv_expert_id)
                         # record send/rcv pairs
-                        if src_rank not in expert_send_info_this_layer:
-                            expert_send_info_this_layer[src_rank] = []
-                        if dst_rank not in expert_recv_info_this_layer:
-                            expert_recv_info_this_layer[dst_rank] = []
-                        expert_send_info_this_layer[src_rank].append((dst_rank, expert_id))
-                        expert_recv_info_this_layer[dst_rank].append((src_rank, expert_id))
+                        if source_rank_id not in expert_send_info_this_layer:
+                            expert_send_info_this_layer[source_rank_id] = []
+                        if target_rank_id not in expert_recv_info_this_layer:
+                            expert_recv_info_this_layer[target_rank_id] = []
+                        #local_recv_expert_id = np.where(current_expert_maps_this_layer[source_rank_id] == recv_expert_id)[0][0]
+                        expert_send_info_this_layer[source_rank_id].append((target_rank_id, recv_expert_id))
+                        expert_recv_info_this_layer[target_rank_id].append((source_rank_id, recv_expert_id))
 
-                        remove_index = np.where(np.logical_and(
-                            dst_rank_indices == dst_rank, experts_to_recv == expert_id))
-
-                        # update
-                        dst_rank_indices = np.delete(
-                            dst_rank_indices, remove_index)
-                        experts_to_recv = np.delete(experts_to_recv, remove_index)
-
+                        # 从需求列表中删除已处理的专家
+                        idx_to_remove = None
+                        for idx, dst_info in enumerate(dst_ranks_needed_experts):
+                            if dst_info[0] == target_rank_id and dst_info[1] == recv_expert_id:
+                                idx_to_remove = idx
+                                break
+                        if idx_to_remove is not None:
+                            dst_ranks_needed_experts.pop(idx_to_remove)
             yield (expert_send_info_this_layer, expert_recv_info_this_layer,
-                updated_expert_maps_this_layer_org, layer_id)
+            updated_expert_maps_this_layer_org, layer_id)
 
     # TODO: Here only expert weight exchange is considered, need to be extended to cover other weight update cases
     def compose_expert_update_info_greedy(self, updated_expert_maps, current_expert_maps):
