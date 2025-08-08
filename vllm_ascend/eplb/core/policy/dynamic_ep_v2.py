@@ -446,7 +446,7 @@ class DynamicEplbV2(EplbPolicy):
     @staticmethod
     def two_device_exchange_experts(cur_device_result, exchange_device_result, cur_exchanged_expert_id,
                                     next_exchanged_expert_id, ave_workload, increment, num_redundancy_expert):
-        # 提取数据
+
         cur_weights = cur_device_result['expert_weights']
         next_weights = exchange_device_result['expert_weights']
         cur_expert_ids = cur_device_result['assigned_experts']
@@ -454,44 +454,31 @@ class DynamicEplbV2(EplbPolicy):
         cur_total = cur_device_result['total_load']
         next_total = exchange_device_result['total_load']
 
-        # 转换列表为集合加速成员检查
         cur_expert_set = set(cur_expert_ids)
         next_expert_set = set(next_expert_ids)
         cur_exchanged_set = set(cur_exchanged_expert_id)
         next_exchanged_set = set(next_exchanged_expert_id)
 
         max_weight = max(cur_total, next_total)
-        threshold = ave_workload * increment  # 预计算阈值
+        threshold = ave_workload * increment
         best_cur_index = -1
         best_next_index = -1
-        best_max_weight = max_weight  # 跟踪最佳交换后的最大负载
+        best_max_weight = max_weight
 
-        # 外层循环：当前设备的专家
         for cur_idx, (cur_weight, cur_expert) in enumerate(zip(cur_weights, cur_expert_ids)):
-            # 跳过不允许交换的专家
             if cur_expert in cur_exchanged_set:
                 continue
-
-            # 内层循环：目标设备的专家
             for next_idx, (next_weight, next_expert) in enumerate(zip(next_weights, next_expert_ids)):
-                # 跳过不允许交换的情况
                 if (next_expert in next_exchanged_set or
                         cur_expert in next_expert_set or
                         next_expert in cur_expert_set):
                     continue
-
-                # 计算交换后负载
                 new_cur_load = cur_total - cur_weight + next_weight
                 new_next_load = next_total - next_weight + cur_weight
-
-                # 提前跳过无效交换（负载未降低）
                 if new_cur_load >= max_weight or new_next_load >= max_weight:
                     continue
-
                 new_max = max(new_cur_load, new_next_load)
                 improvement = max_weight - new_max
-
-                # 检查是否满足改进条件
                 if new_max < best_max_weight and improvement >= threshold:
                     best_max_weight = new_max
                     best_cur_index = cur_idx
@@ -502,13 +489,12 @@ class DynamicEplbV2(EplbPolicy):
     def expert_exchange_between_devices(self, ave_workload, increment, cur_layer_result, com_between_devices,
                                         num_redundancy_expert,
                                         node_idx=0, per_node_device_num=0, is_node_redundant=False):
-        # 提取当前节点或全局设备结果
+
         if is_node_redundant:
             cur_devices_result = cur_layer_result[node_idx * per_node_device_num:(node_idx + 1) * per_node_device_num]
         else:
             cur_devices_result = cur_layer_result
 
-        # 初始化设备负载列表（负载值, 设备索引）
         devices_total_weight = [(device['total_load'], device['device_id'] - 1) for device in cur_devices_result]
         sorted_weights = sorted(devices_total_weight, key=lambda x: x[0])  # 初始排序
 
@@ -517,20 +503,15 @@ class DynamicEplbV2(EplbPolicy):
             exchange_frequency -= 1
             exchange_occurred = False
 
-            # 最大负载设备（最后一个元素）
             max_weight, max_device_id = sorted_weights[-1]
 
-            # 尝试与每个最小负载设备交换（从最小开始）
             for i in range(len(sorted_weights) - 1):
                 min_weight, min_device_id = sorted_weights[i]
-
-                # 检查设备是否允许通信
                 if min_device_id not in com_between_devices[max_device_id]:
-                    # 获取可交换的专家ID
+
                     cur_exchange_ids = list(com_between_devices[max_device_id].values())
                     next_exchange_ids = list(com_between_devices[min_device_id].values())
 
-                    # 尝试交换专家
                     cur_idx, next_idx = self.two_device_exchange_experts(
                         cur_layer_result[max_device_id],
                         cur_layer_result[min_device_id],
@@ -542,23 +523,18 @@ class DynamicEplbV2(EplbPolicy):
                     )
 
                     if cur_idx != -1:
-                        # 执行专家交换
                         self.exchange_expert(
                             cur_idx, next_idx,
                             max_device_id, min_device_id,
                             cur_layer_result, com_between_devices
                         )
 
-                        # 更新负载值
                         new_max_load = cur_layer_result[max_device_id]['total_load']
                         new_min_load = cur_layer_result[min_device_id]['total_load']
 
-                        # 从排序列表中移除旧条目（先移除后面的元素避免索引变化）
-                        del sorted_weights[-1]  # 移除最大设备
-                        del sorted_weights[i]  # 移除最小设备
+                        del sorted_weights[-1]
+                        del sorted_weights[i]
 
-                        # 二分插入新负载值（保持有序）
-                        # 插入最小设备新负载
                         lo, hi = 0, len(sorted_weights)
                         while lo < hi:
                             mid = (lo + hi) // 2
@@ -568,7 +544,6 @@ class DynamicEplbV2(EplbPolicy):
                                 lo = mid + 1
                         sorted_weights.insert(lo, (new_min_load, min_device_id))
 
-                        # 插入最大设备新负载
                         lo, hi = 0, len(sorted_weights)
                         while lo < hi:
                             mid = (lo + hi) // 2
@@ -579,10 +554,10 @@ class DynamicEplbV2(EplbPolicy):
                         sorted_weights.insert(lo, (new_max_load, max_device_id))
 
                         exchange_occurred = True
-                        break  # 退出内层循环
+                        break
 
             if not exchange_occurred:
-                break  # 无有效交换时提前终止
+                break 
 
     def exchange_experts(self, layer_result, layer_com_between_devices, num_nodes, device_num, is_node_redundant,
                          ave_workload, increment, num_redundancy_expert, org_deployment):
