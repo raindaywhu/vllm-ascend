@@ -59,7 +59,7 @@ class DynamicTable:
     placement_table = None
 
 
-class DynamicEplbV2(EplbPolicy):
+class DynamicEplbV2p(EplbPolicy):
 
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
@@ -183,7 +183,7 @@ class DynamicEplbV2(EplbPolicy):
                 expert_id, original_weight = target_weight
                 if original_weight == -1:
                     print("Error:Redundant expert failure re-occurred")
-                    redundancy_successful = True
+                    devices_with_slots = []
                     break
                 redundancy_successful = False
                 for cur_device_id in devices_with_slots:
@@ -221,6 +221,7 @@ class DynamicEplbV2(EplbPolicy):
 
         sorted_indices = np.argsort([w for _, w in redundant_expert_list], kind='stable')[::-1]
         return [redundant_expert_list[i] for i in sorted_indices]
+
 
     @staticmethod
     def non_redundant_expert_information(origin_deployment, updated_weights, rendun_pos):
@@ -437,17 +438,18 @@ class DynamicEplbV2(EplbPolicy):
 
         return report, max_load, com_between_devices
 
-    def two_device_exchange_experts(self, cur_device_result, swap_device_result, cur_exchanged_expert_ids,
-                                    next_exchanged_expert_ids, ave_workload, increment, num_redundancy_expert):
+    @staticmethod
+    def two_device_exchange_experts(cur_device_result, exchange_device_result, cur_exchanged_expert_id,
+                                    next_exchanged_expert_id, ave_workload, increment, num_redundancy_expert):
 
         cur_device_weight = cur_device_result['expert_weights']
-        next_device_weight = swap_device_result['expert_weights']
+        next_device_weight = exchange_device_result['expert_weights']
 
         cur_device_expert_id = cur_device_result['assigned_experts']
-        next_device_expert_id = swap_device_result['assigned_experts']
+        next_device_expert_id = exchange_device_result['assigned_experts']
 
         cur_device_total_weight = cur_device_result['total_load']
-        next_device_total_weight = swap_device_result['total_load']
+        next_device_total_weight = exchange_device_result['total_load']
         max_weight = max(cur_device_total_weight, next_device_total_weight)
 
         cur_exchange_index = -1
@@ -459,18 +461,19 @@ class DynamicEplbV2(EplbPolicy):
                 change_flag = True
                 if (cur_device_expert_id[index] in next_device_expert_id or next_device_expert_id[next_index] in cur_device_expert_id):
                     change_flag = False
-                if (cur_device_expert_id[index] not in cur_exchanged_expert_ids) and (
-                        next_device_expert_id[next_index] not in next_exchanged_expert_ids) and change_flag:
+                if (cur_device_expert_id[index] not in cur_exchanged_expert_id) and (
+                        next_device_expert_id[next_index] not in next_exchanged_expert_id) and change_flag:
 
                     cur_total_weight_after_exchange = cur_device_total_weight - weight + next_weight
                     next_total_weight_after_exchange = next_device_total_weight - next_weight + weight
                     exchange_max_weight = max(cur_total_weight_after_exchange, next_total_weight_after_exchange)
-                    if exchange_max_weight < cur_max_weight and (max_weight - exchange_max_weight) >= (ave_workload * increment):
+                    if exchange_max_weight < cur_max_weight and (max_weight - exchange_max_weight) >= (
+                            ave_workload * increment):
                         cur_max_weight = exchange_max_weight
                         cur_exchange_index = index
                         next_exchange_index = next_index
 
-        return cur_exchange_index, next_exchange_index, cur_max_weight
+        return cur_exchange_index, next_exchange_index
 
     def expert_exchange_between_devices(self, ave_workload, increment, cur_layer_result, com_between_devices, num_redundancy_expert,
                                          node_idx=0, per_node_device_num=0, is_node_redundant=False):
@@ -488,48 +491,37 @@ class DynamicEplbV2(EplbPolicy):
         while exchange_frequency > 0:
             exchange_frequency -= 1
             devices_total_weight.sort(key=lambda x: x[0])
-            optimal_cur_exchange_index = -1
-            cur_max_weight = devices_total_weight[-1][0]
             max_weight_device_id = devices_total_weight[-1][1]
             exchange = False
             for index in range(0, len(devices_total_weight) - 1):
-                swap_weight_device_id = devices_total_weight[index][1]
-                if swap_weight_device_id not in com_between_devices[max_weight_device_id]:
-                    cur_exchanged_expert_ids = list(com_between_devices[max_weight_device_id].values())
-                    next_exchanged_expert_ids = list(com_between_devices[swap_weight_device_id].values())
+                min_weight_device_id = devices_total_weight[index][1]
+                if min_weight_device_id not in com_between_devices[max_weight_device_id]:
+                    cur_exchanged_expert_id = list(com_between_devices[max_weight_device_id].values())
+                    next_exchanged_expert_id = list(com_between_devices[min_weight_device_id].values())
 
-                    cur_exchange_index, next_exchange_index, max_weight = self.two_device_exchange_experts(
+                    cur_exchange_index, next_exchange_index = self.two_device_exchange_experts(
                         cur_layer_result[max_weight_device_id],
-                        cur_layer_result[swap_weight_device_id],
-                        cur_exchanged_expert_ids,
-                        next_exchanged_expert_ids,
+                        cur_layer_result[min_weight_device_id],
+                        cur_exchanged_expert_id,
+                        next_exchanged_expert_id,
                         ave_workload,
                         increment,
                         num_redundancy_expert)
 
                     if cur_exchange_index != -1:
-                        if cur_max_weight > max_weight:
-                            cur_max_weight = max_weight
-                            optimal_cur_exchange_index = cur_exchange_index
-                            optimal_next_exchange_index = next_exchange_index
-                            optimal_swap_weight_device_id = swap_weight_device_id
-                            optimal_index = index
+                        self.exchange_expert(cur_exchange_index,
+                                             next_exchange_index,
+                                             max_weight_device_id,
+                                             min_weight_device_id,
+                                             cur_layer_result,
+                                             com_between_devices)
 
-
-            if optimal_cur_exchange_index != -1:
-                self.exchange_expert(optimal_cur_exchange_index,
-                                     optimal_next_exchange_index,
-                                     max_weight_device_id,
-                                     optimal_swap_weight_device_id,
-                                     cur_layer_result,
-                                     com_between_devices)
-
-                devices_total_weight[-1] = (
-                    cur_layer_result[max_weight_device_id]['total_load'], max_weight_device_id)
-                devices_total_weight[optimal_index] = (
-                    cur_layer_result[optimal_swap_weight_device_id]['total_load'], optimal_swap_weight_device_id)
-
-                exchange = True
+                        devices_total_weight[-1] = (
+                            cur_layer_result[max_weight_device_id]['total_load'], max_weight_device_id)
+                        devices_total_weight[index] = (
+                            cur_layer_result[min_weight_device_id]['total_load'], min_weight_device_id)
+                        exchange = True
+                        break
 
             if not exchange:
                 break
@@ -603,7 +595,7 @@ class DynamicEplbV2(EplbPolicy):
         return global_deployment
 
 
-    def rebalance_experts(self, current_expert_table, expert_workload, is_node_redundant = False, increment = 0.01):
+    def rebalance_experts(self, current_expert_table, expert_workload, is_node_redundant = False, increment = 0.0):
         info = DynamicTable()
         info.workload_table = expert_workload.numpy()
         info.placement_table = current_expert_table.numpy()
@@ -669,6 +661,9 @@ class DynamicEplbV2(EplbPolicy):
 
             max_heat_per_layer_after[layer] = max(result, key=lambda x: x['total_load'])['total_load']
 
+            # for box in result:
+            #     print("before: ",
+            #           f"Box {box['device_id']}: Items = {box['assigned_experts']}, weight = {box['expert_weights']}, Total Weight = {box['total_load']}, Item Count = {box['expert_count']}")
         layer_changed_ratio = []
         for layer_idx in range(layer_num):
             layer_changed_ratio.append(self.safe_divide(max_heat_per_layer_after[layer_idx], max_heat_per_layer_before[layer_idx]))
