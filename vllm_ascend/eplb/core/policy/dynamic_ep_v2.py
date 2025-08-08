@@ -59,7 +59,7 @@ class DynamicTable:
     placement_table = None
 
 
-class DynamicEplbV2p(EplbPolicy):
+class DynamicEplbV2(EplbPolicy):
 
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
@@ -140,27 +140,25 @@ class DynamicEplbV2p(EplbPolicy):
 
         return layer_imbalance
 
-
     def compute_redundant_assignments(self, base_experts, num_redundant_experts, num_experts):
 
+        weights = np.array([w for _, w in base_experts], dtype=np.float64)
+        redundancy_counts = np.zeros(num_experts, dtype=np.int32)
         redundant_assignments = [[] for _ in range(num_experts)]
-        current_weights = base_experts.copy()
+
+        redundant_ids = np.arange(num_experts, num_experts + num_redundant_experts)
 
         for i in range(num_redundant_experts):
-            sorted_indices = np.argsort([w for _, w in current_weights], kind='stable')[::-1]
-            sorted_weights = [current_weights[i] for i in sorted_indices]
+            expert_idx = np.argmax(weights)
 
-            target_expert = sorted_weights[0]
-            expert_id, original_weight = target_expert
+            redundancy_counts[expert_idx] += 1
+            current_count = redundancy_counts[expert_idx]
+            weights[expert_idx] = weights[expert_idx] * current_count / (current_count + 1)
 
-            current_redundancy = len(redundant_assignments[expert_id])
-            new_avg_weight = self.safe_divide(original_weight * (current_redundancy + 1), (current_redundancy + 2))
+            redundant_assignments[expert_idx].append(redundant_ids[i])
 
-            redundant_assignments[expert_id].append(num_experts + i)
-            current_weights[sorted_indices[0]] = (expert_id, new_avg_weight)
-
-        sorted_indices = np.argsort([w for _, w in current_weights], kind='stable')[::-1]
-        sorted_weights = [current_weights[i] for i in sorted_indices]
+        sorted_indices = np.argsort(weights)[::-1]
+        sorted_weights = [(i, weights[i]) for i in sorted_indices]
 
         return redundant_assignments, sorted_weights
 
@@ -222,28 +220,38 @@ class DynamicEplbV2p(EplbPolicy):
         sorted_indices = np.argsort([w for _, w in redundant_expert_list], kind='stable')[::-1]
         return [redundant_expert_list[i] for i in sorted_indices]
 
-
     @staticmethod
     def non_redundant_expert_information(origin_deployment, updated_weights, rendun_pos):
-
         device_num = len(origin_deployment)
         num_experts_per_device = origin_deployment.shape[1]
-        device_assignments = [[-1 for _ in range(num_experts_per_device)] for _ in range(device_num)]
-        device_weights = [[0 for _ in range(num_experts_per_device)] for _ in range(device_num)]
-        device_loads = [0] * device_num
+
+        weight_dict = {expert_id: weight for expert_id, weight in updated_weights}
+
+        device_assignments = [[-1] * num_experts_per_device for _ in range(device_num)]
+        device_weights = [[0.0] * num_experts_per_device for _ in range(device_num)]
+        device_loads = [0.0] * device_num
         device_counts = [0] * device_num
 
-        for device_id, device in enumerate(origin_deployment):
-            for index, expert_id in enumerate(device):
-                if index in rendun_pos[device_id]:
+        rendun_pos_set = [set(positions) for positions in rendun_pos]
+
+        for device_id in range(device_num):
+            device_experts = origin_deployment[device_id]
+            skip_positions = rendun_pos_set[device_id]
+
+            for index in range(num_experts_per_device):
+                if index in skip_positions:
                     continue
+
+                expert_id = device_experts[index]
+                cur_weight = weight_dict[expert_id]
+
                 device_assignments[device_id][index] = expert_id
-                cur_weight = next(weight for expert_id_of_weight, weight in updated_weights if expert_id_of_weight == expert_id)
                 device_weights[device_id][index] = cur_weight
                 device_loads[device_id] += cur_weight
                 device_counts[device_id] += 1
 
         return device_assignments, device_weights, device_loads, device_counts
+
 
     def recomputing_initial_weight(self, layer_workloads, device_assignments):
         num_all_experts = [0] * len(layer_workloads)
@@ -334,7 +342,6 @@ class DynamicEplbV2p(EplbPolicy):
             num_experts,
             rendun_pos)
 
-
         return device_assignments, device_weights, device_loads, device_counts, com_between_devices
 
     @staticmethod
@@ -403,11 +410,9 @@ class DynamicEplbV2p(EplbPolicy):
             com_between_devices = []
 
             for node_id in range(node_num):
-                cur_node_weights = weights[
-                                   node_id * per_node_route_expert_num: (node_id + 1) * per_node_route_expert_num]
-                cur_original_deployment = original_deployment[
-                                          node_id * per_node_device_num: (node_id + 1) * per_node_device_num]
 
+                cur_node_weights = weights[node_id * per_node_route_expert_num: (node_id + 1) * per_node_route_expert_num]
+                cur_original_deployment = original_deployment[node_id * per_node_device_num: (node_id + 1) * per_node_device_num]
                 cur_node_rendun_pos = rendun_pos[node_id * per_node_device_num: (node_id + 1) * per_node_device_num]
 
                 cur_device_assignments, cur_device_weights, cur_device_loads, cur_device_counts, cur_com_between_devices = self.redundancy_again(
@@ -441,90 +446,143 @@ class DynamicEplbV2p(EplbPolicy):
     @staticmethod
     def two_device_exchange_experts(cur_device_result, exchange_device_result, cur_exchanged_expert_id,
                                     next_exchanged_expert_id, ave_workload, increment, num_redundancy_expert):
+        # 提取数据
+        cur_weights = cur_device_result['expert_weights']
+        next_weights = exchange_device_result['expert_weights']
+        cur_expert_ids = cur_device_result['assigned_experts']
+        next_expert_ids = exchange_device_result['assigned_experts']
+        cur_total = cur_device_result['total_load']
+        next_total = exchange_device_result['total_load']
 
-        cur_device_weight = cur_device_result['expert_weights']
-        next_device_weight = exchange_device_result['expert_weights']
+        # 转换列表为集合加速成员检查
+        cur_expert_set = set(cur_expert_ids)
+        next_expert_set = set(next_expert_ids)
+        cur_exchanged_set = set(cur_exchanged_expert_id)
+        next_exchanged_set = set(next_exchanged_expert_id)
 
-        cur_device_expert_id = cur_device_result['assigned_experts']
-        next_device_expert_id = exchange_device_result['assigned_experts']
+        max_weight = max(cur_total, next_total)
+        threshold = ave_workload * increment  # 预计算阈值
+        best_cur_index = -1
+        best_next_index = -1
+        best_max_weight = max_weight  # 跟踪最佳交换后的最大负载
 
-        cur_device_total_weight = cur_device_result['total_load']
-        next_device_total_weight = exchange_device_result['total_load']
-        max_weight = max(cur_device_total_weight, next_device_total_weight)
+        # 外层循环：当前设备的专家
+        for cur_idx, (cur_weight, cur_expert) in enumerate(zip(cur_weights, cur_expert_ids)):
+            # 跳过不允许交换的专家
+            if cur_expert in cur_exchanged_set:
+                continue
 
-        cur_exchange_index = -1
-        next_exchange_index = -1
-        cur_max_weight = max_weight
+            # 内层循环：目标设备的专家
+            for next_idx, (next_weight, next_expert) in enumerate(zip(next_weights, next_expert_ids)):
+                # 跳过不允许交换的情况
+                if (next_expert in next_exchanged_set or
+                        cur_expert in next_expert_set or
+                        next_expert in cur_expert_set):
+                    continue
 
-        for index, weight in enumerate(cur_device_weight):
-            for next_index, next_weight in enumerate(next_device_weight):
-                change_flag = True
-                if (cur_device_expert_id[index] in next_device_expert_id or next_device_expert_id[next_index] in cur_device_expert_id):
-                    change_flag = False
-                if (cur_device_expert_id[index] not in cur_exchanged_expert_id) and (
-                        next_device_expert_id[next_index] not in next_exchanged_expert_id) and change_flag:
+                # 计算交换后负载
+                new_cur_load = cur_total - cur_weight + next_weight
+                new_next_load = next_total - next_weight + cur_weight
 
-                    cur_total_weight_after_exchange = cur_device_total_weight - weight + next_weight
-                    next_total_weight_after_exchange = next_device_total_weight - next_weight + weight
-                    exchange_max_weight = max(cur_total_weight_after_exchange, next_total_weight_after_exchange)
-                    if exchange_max_weight < cur_max_weight and (max_weight - exchange_max_weight) >= (
-                            ave_workload * increment):
-                        cur_max_weight = exchange_max_weight
-                        cur_exchange_index = index
-                        next_exchange_index = next_index
+                # 提前跳过无效交换（负载未降低）
+                if new_cur_load >= max_weight or new_next_load >= max_weight:
+                    continue
 
-        return cur_exchange_index, next_exchange_index
+                new_max = max(new_cur_load, new_next_load)
+                improvement = max_weight - new_max
 
-    def expert_exchange_between_devices(self, ave_workload, increment, cur_layer_result, com_between_devices, num_redundancy_expert,
-                                         node_idx=0, per_node_device_num=0, is_node_redundant=False):
+                # 检查是否满足改进条件
+                if new_max < best_max_weight and improvement >= threshold:
+                    best_max_weight = new_max
+                    best_cur_index = cur_idx
+                    best_next_index = next_idx
 
+        return best_cur_index, best_next_index
+
+    def expert_exchange_between_devices(self, ave_workload, increment, cur_layer_result, com_between_devices,
+                                        num_redundancy_expert,
+                                        node_idx=0, per_node_device_num=0, is_node_redundant=False):
+        # 提取当前节点或全局设备结果
         if is_node_redundant:
             cur_devices_result = cur_layer_result[node_idx * per_node_device_num:(node_idx + 1) * per_node_device_num]
         else:
             cur_devices_result = cur_layer_result
 
-        devices_total_weight = []
-        for device in cur_devices_result:
-            devices_total_weight.append((device['total_load'], device['device_id'] - 1))
+        # 初始化设备负载列表（负载值, 设备索引）
+        devices_total_weight = [(device['total_load'], device['device_id'] - 1) for device in cur_devices_result]
+        sorted_weights = sorted(devices_total_weight, key=lambda x: x[0])  # 初始排序
 
         exchange_frequency = 100
         while exchange_frequency > 0:
             exchange_frequency -= 1
-            devices_total_weight.sort(key=lambda x: x[0])
-            max_weight_device_id = devices_total_weight[-1][1]
-            exchange = False
-            for index in range(0, len(devices_total_weight) - 1):
-                min_weight_device_id = devices_total_weight[index][1]
-                if min_weight_device_id not in com_between_devices[max_weight_device_id]:
-                    cur_exchanged_expert_id = list(com_between_devices[max_weight_device_id].values())
-                    next_exchanged_expert_id = list(com_between_devices[min_weight_device_id].values())
+            exchange_occurred = False
 
-                    cur_exchange_index, next_exchange_index = self.two_device_exchange_experts(
-                        cur_layer_result[max_weight_device_id],
-                        cur_layer_result[min_weight_device_id],
-                        cur_exchanged_expert_id,
-                        next_exchanged_expert_id,
+            # 最大负载设备（最后一个元素）
+            max_weight, max_device_id = sorted_weights[-1]
+
+            # 尝试与每个最小负载设备交换（从最小开始）
+            for i in range(len(sorted_weights) - 1):
+                min_weight, min_device_id = sorted_weights[i]
+
+                # 检查设备是否允许通信
+                if min_device_id not in com_between_devices[max_device_id]:
+                    # 获取可交换的专家ID
+                    cur_exchange_ids = list(com_between_devices[max_device_id].values())
+                    next_exchange_ids = list(com_between_devices[min_device_id].values())
+
+                    # 尝试交换专家
+                    cur_idx, next_idx = self.two_device_exchange_experts(
+                        cur_layer_result[max_device_id],
+                        cur_layer_result[min_device_id],
+                        cur_exchange_ids,
+                        next_exchange_ids,
                         ave_workload,
                         increment,
-                        num_redundancy_expert)
+                        num_redundancy_expert
+                    )
 
-                    if cur_exchange_index != -1:
-                        self.exchange_expert(cur_exchange_index,
-                                             next_exchange_index,
-                                             max_weight_device_id,
-                                             min_weight_device_id,
-                                             cur_layer_result,
-                                             com_between_devices)
+                    if cur_idx != -1:
+                        # 执行专家交换
+                        self.exchange_expert(
+                            cur_idx, next_idx,
+                            max_device_id, min_device_id,
+                            cur_layer_result, com_between_devices
+                        )
 
-                        devices_total_weight[-1] = (
-                            cur_layer_result[max_weight_device_id]['total_load'], max_weight_device_id)
-                        devices_total_weight[index] = (
-                            cur_layer_result[min_weight_device_id]['total_load'], min_weight_device_id)
-                        exchange = True
-                        break
+                        # 更新负载值
+                        new_max_load = cur_layer_result[max_device_id]['total_load']
+                        new_min_load = cur_layer_result[min_device_id]['total_load']
 
-            if not exchange:
-                break
+                        # 从排序列表中移除旧条目（先移除后面的元素避免索引变化）
+                        del sorted_weights[-1]  # 移除最大设备
+                        del sorted_weights[i]  # 移除最小设备
+
+                        # 二分插入新负载值（保持有序）
+                        # 插入最小设备新负载
+                        lo, hi = 0, len(sorted_weights)
+                        while lo < hi:
+                            mid = (lo + hi) // 2
+                            if new_min_load < sorted_weights[mid][0]:
+                                hi = mid
+                            else:
+                                lo = mid + 1
+                        sorted_weights.insert(lo, (new_min_load, min_device_id))
+
+                        # 插入最大设备新负载
+                        lo, hi = 0, len(sorted_weights)
+                        while lo < hi:
+                            mid = (lo + hi) // 2
+                            if new_max_load < sorted_weights[mid][0]:
+                                hi = mid
+                            else:
+                                lo = mid + 1
+                        sorted_weights.insert(lo, (new_max_load, max_device_id))
+
+                        exchange_occurred = True
+                        break  # 退出内层循环
+
+            if not exchange_occurred:
+                break  # 无有效交换时提前终止
 
     def exchange_experts(self, layer_result, layer_com_between_devices, num_nodes, device_num, is_node_redundant,
                          ave_workload, increment, num_redundancy_expert, org_deployment):
@@ -560,7 +618,6 @@ class DynamicEplbV2p(EplbPolicy):
                 count += 1
         return count
 
-
     @staticmethod
     def constraint_expert_local_exchange(current_expert_table, global_deployment):
         for layer_id in range(len(global_deployment)):
@@ -595,7 +652,7 @@ class DynamicEplbV2p(EplbPolicy):
         return global_deployment
 
 
-    def rebalance_experts(self, current_expert_table, expert_workload, is_node_redundant = False, increment = 0.0):
+    def rebalance_experts(self, current_expert_table, expert_workload, is_node_redundant = False, increment = 0.01):
         info = DynamicTable()
         info.workload_table = expert_workload.numpy()
         info.placement_table = current_expert_table.numpy()
@@ -625,8 +682,9 @@ class DynamicEplbV2p(EplbPolicy):
         layer_initial_imbalance = self.calculate_initial_imbalance(info.placement_table, layer_workloads)
         max_heat_per_layer_after = np.zeros([layer_num])
         sum_num = 0
+
         for layer in range(layer_num):
-            # print(f"Load imbalance ratio of layer {layer} under the new workload", layer_initial_imbalance[layer])
+            #print(f"Load imbalance ratio of layer {layer} under the new workload", layer_initial_imbalance[layer])
             if layer_initial_imbalance[layer] < 1.01:
                 global_deployment[layer] = info.placement_table[layer]
                 continue
@@ -647,12 +705,14 @@ class DynamicEplbV2p(EplbPolicy):
                                                                                          info.placement_table[layer],
                                                                                          expert_from_device[layer],
                                                                                          num_node, is_node_redundant, rendun_pos)
-            # print(layer, f"Imbalance Ratio after Redundancy Adjustment:", self.safe_divide(max_workload, ave_workload))
+
+            #print(layer, f"Imbalance Ratio after Redundancy Adjustment:", self.safe_divide(max_workload, ave_workload))
 
             global_deployment[layer], new_max_workload = self.exchange_experts(result, com_between_devices,
                                                                                num_node, num_npus, is_node_redundant, ave_workload,
                                                                                increment, num_redundancy_expert, info.placement_table[layer])
-            # print(layer, f"Imbalance Ratio after Swap Adjustment:", self.safe_divide(new_max_workload, ave_workload))
+
+            #print(layer, f"Imbalance Ratio after Swap Adjustment:", self.safe_divide(new_max_workload, ave_workload))
 
             for device_id in range(num_npus):
                 com_between_devices[device_id] = {key: value for key, value in
@@ -664,6 +724,7 @@ class DynamicEplbV2p(EplbPolicy):
             # for box in result:
             #     print("before: ",
             #           f"Box {box['device_id']}: Items = {box['assigned_experts']}, weight = {box['expert_weights']}, Total Weight = {box['total_load']}, Item Count = {box['expert_count']}")
+
         layer_changed_ratio = []
         for layer_idx in range(layer_num):
             layer_changed_ratio.append(self.safe_divide(max_heat_per_layer_after[layer_idx], max_heat_per_layer_before[layer_idx]))
@@ -677,4 +738,4 @@ class DynamicEplbV2p(EplbPolicy):
 
         new_global_deployment = self.constraint_expert_local_exchange(info.placement_table, global_deployment)
 
-        return change, per_layer_priority, np.array(new_global_deployment).tolist()
+        return change, per_layer_priority, new_global_deployment
