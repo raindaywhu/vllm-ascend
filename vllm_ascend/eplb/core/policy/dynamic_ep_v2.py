@@ -675,6 +675,6 @@ class DynamicEplbV2p(EplbPolicy):
         if npu_heat_all_after < 0.95 * npu_heat_all_origin:
             change = 1
 
-        new_global_deployment = self.constraint_expert_local_exchange(current_expert_table, global_deployment)
+        new_global_deployment = self.constraint_expert_local_exchange(info.placement_table, global_deployment)
 
         return change, per_layer_priority, np.array(new_global_deployment).tolist()
