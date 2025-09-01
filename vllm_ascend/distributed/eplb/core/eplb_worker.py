@@ -26,8 +26,7 @@ import torch.distributed as dist
 from vllm.logger import logger
 from vllm.distributed.eplb.eplb_utils import generate_log2phy_map
 from vllm.distributed.eplb.eplb_policy.abstract_policy import DynamicConfig
-
-from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
+from vllm.distributed.eplb.eplb_policy.policy_factory import PolicyFactory
 
 
 class EplbWorker:
