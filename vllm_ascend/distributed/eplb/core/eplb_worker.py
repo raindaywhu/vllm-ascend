@@ -23,18 +23,20 @@ import networkx as nx  # type: ignore
 import numpy as np
 import torch
 import torch.distributed as dist
-from vllm.logger import logger
-from vllm.distributed.eplb.eplb_utils import generate_log2phy_map
-from vllm.distributed.eplb.eplb_policy.abstract_policy import DynamicConfig
+
+from vllm.distributed import get_node_count, get_ep_group
 from vllm.distributed.eplb.eplb_policy.policy_factory import PolicyFactory
+from vllm.distributed.eplb.eplb_policy.abstract_policy import EplbPolicy
+from vllm.logger import logger
+
+from vllm.distributed.eplb.eplb_utils.eplb_utils import generate_log2phy_map
 
 
 class EplbWorker:
 
     def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
         self.policy_type = policy_type
-        self.policy = PolicyFactory.generate_policy(policy_type,
-                                                    DynamicConfig())
+        self.policy = PolicyFactory.generate_policy(policy_type)
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
@@ -65,7 +67,8 @@ class EplbWorker:
         # Get the updated expert table based on the workload information
         old_placement = self.global2local(self.old_expert_maps,
                                           self.num_local_experts)
-        _, _, new_placement = self.calculate_rebalance_experts(
+        # 入参适配新的rebalance格式，
+        new_placement = self.calculate_rebalance_experts(
             load_info, old_placement)
 
         if not torch.is_tensor(new_placement):
@@ -290,9 +293,24 @@ class EplbWorker:
         if self.old_expert_maps is None:
             return False, None, None
 
+        # 返回值没有全部使用
+        ep_group = get_ep_group().device_group
+        num_replicas = model.num_physical_experts
+        num_groups = model.num_expert_groups
+        num_nodes = get_node_count()
+        num_gpus = ep_group.size()
+        old_global_expert_indices = EplbPolicy.convert_table(old_placement, num_layer=128)
+        global_expert_load = EplbPolicy.convert_format(old_placement, load_info)
+
         changed, priority, new_map = self.policy.rebalance_experts(
-            old_placement, load_info)
-        return changed, priority, new_map
+            old_global_expert_indices,
+            global_expert_load,
+            num_replicas,
+            num_groups,
+            num_nodes,
+            num_gpus
+        )
+        return self.policy.deployment
 
     def get_init_expert_maps(self):
         """
