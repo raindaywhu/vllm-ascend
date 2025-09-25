@@ -49,9 +49,10 @@ class DynamicEplb(EplbPolicy):
     @staticmethod
     # Split hot (high-load) experts into redundant experts
     def original_compute_balanced_pack_redundancy(origin_weights, card_num,
-                                                  num_redundancy_expert):
+                                                  num_redundancy_expert, card_per_host=16):
         # Step 1: Sort the items by weight in descending order (we are sorting by weight now)
         # Sort based on the second element (the second value of each tuple)
+        host_num = card_num // card_per_host
         route_expert_num = len(origin_weights)
         route_expert_redundancy: list[list[int]] = [
             [] for _ in range(route_expert_num)
@@ -79,19 +80,7 @@ class DynamicEplb(EplbPolicy):
         box_weights = [0] * card_num  # To store the total weight of each box
         box_counts = [0] * card_num  # To store the number of items in each box
         index = 0
-        for i in range(route_expert_num):
-            redundancy_num = len(route_expert_redundancy[i])
-            for _ in range(redundancy_num):
-                cur_weight = 0
-                for item, weight in origin_weights:
-                    if item == i:
-                        cur_weight = weight
-
-                boxes[index].append(i)
-                boxes_weights[index].append(cur_weight)
-                box_weights[index] += cur_weight
-                box_counts[index] += 1
-                index += 1
+        expert_in_hosts = [[0] * host_num for _ in range(route_expert_num)]
 
         sorted_indices = np.argsort([t[1] for t in origin_weights],
                                     kind='stable')[::-1]
@@ -99,28 +88,32 @@ class DynamicEplb(EplbPolicy):
         # Step 4: Distribute items into boxes based on weight
         for item_id, weight in origin_weights:
             # Find the box with the least items but not full
-            min_box_index = -1
-            for i in range(card_num):
-                if item_id in boxes[i]:
-                    continue
-                # Only choose boxes that still have space (box_counts[i] < items_per_box)
-                if box_counts[i] < items_per_box or (box_counts[i]
-                                                     == items_per_box
-                                                     and remaining_items > 0):
-                    if min_box_index == -1 or box_weights[i] < box_weights[
-                            min_box_index]:
-                        min_box_index = i
+            cur_phy_experts = len(route_expert_redundancy[item_id]) + 1
+            for _ in range(cur_phy_experts):
+                min_box_index = -1
+                for i in range(card_num):
+                    host_id = i // card_per_host
+                    max_count = max(expert_in_hosts[item_id])
+                    min_count = min(expert_in_hosts[item_id])
+                    if ((max_count != min_count and expert_in_hosts[item_id][host_id] != min_count)
+                            or item_id in boxes[i]):
+                        continue
+                    # Only choose boxes that still have space (box_counts[i] < items_per_box)
+                    if box_counts[i] < items_per_box or (box_counts[i] == items_per_box and remaining_items > 0):
+                        if min_box_index == -1 or box_weights[i] < box_weights[min_box_index]:
+                            min_box_index = i
+                expert_in_hosts[item_id][min_box_index // card_per_host] += 1
 
-            # Place the item (id) into the selected box
-            boxes[min_box_index].append(item_id)
-            boxes_weights[min_box_index].append(weight)
-            box_weights[min_box_index] += weight
-            box_counts[min_box_index] += 1
+                # Place the item (id) into the selected box
+                boxes[min_box_index].append(item_id)
+                boxes_weights[min_box_index].append(weight)
+                box_weights[min_box_index] += weight
+                box_counts[min_box_index] += 1
 
-            # If there's an imbalance in the remaining items, reduce the "remaining_items" counter
-            if box_counts[min_box_index] == (items_per_box +
-                                             1) and remaining_items > 0:
-                remaining_items -= 1
+                # If there's an imbalance in the remaining items, reduce the "remaining_items" counter
+                if box_counts[min_box_index] == (items_per_box +
+                                                 1) and remaining_items > 0:
+                    remaining_items -= 1
 
         # Step 5: Output each box's contents and total weight
         result = []
@@ -364,7 +357,7 @@ class DynamicEplb(EplbPolicy):
 
             # Obtain the globally balanced placement strategy for each layer
             result, layer_deployment = self.original_compute_balanced_pack_redundancy(
-                weights, num_npus, num_redundancy_expert)
+                weights, num_npus, num_redundancy_expert, self.config.num_die_per_host)
 
             global_deployment[layer] = layer_deployment
             max_heat_per_layer_after[layer] = max(
