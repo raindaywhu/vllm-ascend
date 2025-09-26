@@ -1027,7 +1027,8 @@ class TorchairAscendFusedMoE(FusedMoE):
                 self.expert_load_balancer.get_rank_placement_map(
                     self.moe_instance_id, self.ep_rank))
             self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id, self.ep_rank).npu()
+                self.moe_instance_id, get_ep_group().rank_in_group)
+            self.log2phy = tuple(x.npu() for x in self.log2phy)
             self.global_redundant_expert_num = (
                 self.expert_load_balancer.get_global_redundant_expert_num())
         else:
@@ -1320,7 +1321,7 @@ class TorchairAscendFusedMoE(FusedMoE):
         return self.expert_map
 
     def get_log2phy_map(self):
-        return self.logical_to_physical_map
+        return self.logical_to_physical_map[0]
 
     def clear_moe_load(self):
         if self.moe_load is not None:
